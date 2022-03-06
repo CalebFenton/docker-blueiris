@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+	<meta http-equiv="X-UA-Compatible" content="IE=edge" />
+	<link rel="icon" id="ui3launcher1">
+	<link rel="apple-touch-icon" id="ui3launcher2">
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<meta name="apple-mobile-web-app-capable" content="yes"> <!--iOS Safari-->
+	<meta name="apple-mobile-web-app-status-bar-style" content="black">
+	<meta name="mobile-web-app-capable" content="yes"><!--Android Chrome-->
+	<meta name="theme-color" content="#000000">
+	<link rel="manifest" id="ui3manifest">
+	<title>%%SYSNAME%% UI3</title>
+	<script type="text/javascript">
+		var html5PlayFunc; try { html5PlayFunc = HTMLMediaElement.prototype.play; } catch (e) { }
+
+		// Each method in suppressErrorCallbacks can inspect the error and return true to suppress reporting of the error.
+		var suppressErrorCallbacks = [
+			function (err) // [2020-11-11] LG TV browser injects bad script on line 1 of htm file.
+			{
+				return err.line === 1 && err.msg && err.msg.indexOf("'getAttribute'") > -1 && err.url && err.url.indexOf(".htm") > -1;
+			},
+			function (err) // [2021-07-19] LG TV browser fails repeatedly.
+			{
+				return err.line === 0 && err.charIdx === 0 && err.msg && err.msg.indexOf("Script error.") > -1 && (!err.url || err.url == "");
+			},
+			function (err) // ublock origin in Brave browser
+			{
+				return err.msg && err.msg == "Uncaught TypeError: Cannot redefine property: getElementById" && err.url === "";
+			},
+			function (err) // Edge iOS
+			{
+				return err.msg && err.msg.indexOf("instantSearchSDKJSBridgeClearHighlight") > -1;
+			}
+		];
+
+		// If messages stating "An unexpected error has occurred" become troublesome, you can disable it by deleting this script block!
+		// Also, be sure to report the problem so I can fix it!
+		window.onerror = function (msg, url, line, charIdx)
+		{
+			try
+			{
+				var uiVersionStr = "unknown";
+				if (typeof ui_version != "undefined")
+					uiVersionStr = ui_version;
+				var biVersionStr = "unknown";
+				if (typeof bi_version != "undefined")
+					biVersionStr = bi_version;
+				url = url.replace(/\/\/.*?\//, '//censored_hostname/');
+				var errStr = "An unexpected error has occurred in " + location.pathname + " (v " + uiVersionStr + " / " + biVersionStr + "). A full refresh may solve the problem (CTRL + F5). If you wish to report the error, please SCREENSHOT the browser now.\n\n" + msg + "\nat " + url + " [" + line + ":" + charIdx + "]\n" + navigator.userAgent;
+
+				var errObj = { msg: msg, url: url, line: line, charIdx: charIdx, uiVersionStr: uiVersionStr, biVersionStr: biVersionStr };
+				for (var i = 0; i < suppressErrorCallbacks.length; i++)
+				{
+					try
+					{
+						if (suppressErrorCallbacks[i](errObj))
+						{
+							try { console.log("The following error report was suppressed by callback " + i + ":"); console.error(errStr); }
+							catch (ex) { }
+							return;
+						}
+					}
+					catch (ex)
+					{
+						try { console.log("Error suppression callback " + i + " had an error:"); console.error(errStr); }
+						catch (ex) { }
+						return;
+					}
+				}
+
+				try
+				{
+					if (toaster)
+						toaster.Error(errStr, 600000);
+				}
+				catch (ex) { }
+				alert(errStr);
+			}
+			catch (ex)
+			{
+				alert(ex);
+			}
+		};
+	</script>
+	<script type="text/javascript">
+		var ui_version = "196";
+		var bi_version = "%%VERSION%%";
+		var appPath_raw = "%%VIRTDIR%%";
+		var local_bi_session = "%%SESSION%%";
+		if (!local_bi_session || (local_bi_session.length === 11 && local_bi_session.indexOf("%") === 0 && local_bi_session.indexOf("SESSION") === 2))
+		{
+			local_bi_session = "";
+			bi_version = "0.0.0.0";
+		}
+		var combined_version = ui_version + "-" + bi_version;
+		//if (!!navigator.userAgent.match(/ Android /))
+		//	combined_version += "-" + Date.now();
+		var local_bi_session_arg_always = local_bi_session ? "&session=" + local_bi_session : "";
+		var local_bi_session_arg = navigator.cookieEnabled ? "" : local_bi_session_arg_always;
+		document.getElementById("ui3manifest").href = 'ui3/manifest.json?v=' + combined_version + local_bi_session_arg_always;
+		document.getElementById("ui3launcher1").href = 'ui3/logos/launcher-icon48.png?v=' + combined_version + local_bi_session_arg;
+		document.getElementById("ui3launcher2").href = 'ui3/launcher-icon.png?v=' + combined_version + local_bi_session_arg;
+		document.write('<link href="ui3/libs-ui3.css?v=' + combined_version + local_bi_session_arg + '" rel="stylesheet" />'
+			+ '<link href="ui3/ui3.css?v=' + combined_version + local_bi_session_arg + '" rel="stylesheet" />'
+			+ '<link href="ui3/ui3-local-overrides.css?v=' + combined_version + local_bi_session_arg + '" rel="stylesheet" />');
+	</script>
+</head>
+<body>
+	<div id="svgContainer" style="display: none;"></div>
+	<div id="loadingmsgwrapper" style="position:absolute;width:100%;height:100%;background-color:rgba(0,0,0,0.75);z-index:99999;font-family:Consolas, monospace, Sans-Serif">
+		<div style="position: absolute;left:50%;top:50%;overflow:visible;white-space:nowrap;">
+			<div style="position:relative;transform: translate(-50%, -50%);border:2px solid #444444;color:#666666;background-color:#212325;padding:5px;text-align:center;border-radius:10px;">
+				<div style="margin-bottom:5px;">
+					<img mysrc="ui3/ajax-loader-big.gif" alt="Loading ..." />
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading Web Content...
+					</div>
+					<div id="loadingWebContent" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading Vector Graphics...
+					</div>
+					<div id="loadingSVG" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading H.264 Player...
+					</div>
+					<div id="loadingH264" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Checking Session Status...
+					</div>
+					<div id="loadingLogin" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading Server Status...
+					</div>
+					<div id="loadingServerStatus" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading Camera List...
+					</div>
+					<div id="loadingCameraList" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+				<div>
+					<div class="loadinglabel">
+						Loading Startup Clip...
+					</div>
+					<div id="loadingStartupClip" class="loadingstatus">
+						BUSY
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	<div id="layouttop">
+		<div id="topbar_vertical_align_helper"></div>
+		<div id="systemnamewrapper" onclick="systemNameButtonClick()"><span id="systemname">%%SYSNAME%%</span></div>
+		<div class="topbar_tab selected" name="live" id="topbar_tab_live"><span class="topbar_tab_label">Live View</span></div>
+		<div class="topbar_tab" name="clips" id="topbar_tab_clips"><span class="topbar_tab_label">Clips</span></div>
+		<a id="Something"></a>
+		<div id="btn_main_menu" class="topbar_right_floating icon" name="mainMenu" extendLeft="1" title="Main Menu"><svg class="icon"><use xlink:href="#svg_x5F_Menu"></use></svg><div class="notificationCounter" title="number of unseen warnings"></div></div>
+		<a id="save_snapshot_btn" class="topbar_right_floating icon" href="javascript:void(0)" onclick="saveSnapshot()" target="_blank" title="Save image to disk"><svg class="icon"><use xlink:href="#svg_x5F_Snapshot"></use></svg></a>
+		<div id="open_alerts_btn" class="topbar_right_floating icon" onclick="clipLoader.LoadView('alerts')" title="Open Alerts"><svg class="icon"><use xlink:href="#svg_x5F_Alert1"></use></svg><div class="notificationCounter" title="new alerts"></div></div>
+		<div id="open_all_clips_btn" class="topbar_right_floating icon" onclick="clipLoader.LoadView('all')" title="Open All Clips"><svg class="icon noflip"><use xlink:href="#svg_mio_storage"></use></svg></div>
+	</div>
+	<div id="layoutleft">
+		<div id="sidebarPortraitDragbar"></div>
+		<div id="layoutleftLive">
+			<div id="layoutleftLiveScrollableWrapper">
+				<div id="layoutleftLiveScrollable">
+					<div id="layoutleftLiveContent">
+						<div id="ptzControlsBox" class="leftBarBox">
+							<div class="leftBarHeading collapsibleTrigger" collapsibleid="ptz" title="Pan-Tilt-Zoom Controls">PTZ</div>
+							<div class="leftBarInnerBox">
+								<div id="ptzButtonsMain">
+									<div id="ptzGraphicWrapper">
+										<div class="ptzGraphicContainer" uisize="large">
+											<div class="ptzGraphic ptzBackground" layoutR="0 0 190 190" svgid="PTZbackground"></div>
+											<div class="ptzGraphic" layoutR="2 2 186 186" svgid="PTZoutsideRing"></div>
+											<div class="ptzGraphic" layoutR="67 53 56 26" svgid="PTZzoomIn"></div>
+											<div class="ptzGraphic" layoutR="67 111 56 26" svgid="PTZzoomOut"></div>
+											<div class="ptzGraphic" layoutR="111 67 26 56" svgid="PTZfocusNear"></div>
+											<div class="ptzGraphic" layoutR="53 67 26 56" svgid="PTZfocusFar"></div>
+											<div class="ptzGraphic" layoutR="78 78 34 34" svgid="PTZstop"></div>
+											<div class="ptzGraphic" layoutR="83 24 24 15" svgid="PTZcardinalUp"></div>
+											<div class="ptzGraphic" layoutR="151 83 15 24" svgid="PTZcardinalRight"></div>
+											<div class="ptzGraphic" layoutR="83 151 24 15" svgid="PTZcardinalDown"></div>
+											<div class="ptzGraphic" layoutR="24 83 15 24" svgid="PTZcardinalLeft"></div>
+											<div class="ptzGraphic" layoutR="136 47 7 7" svgid="PTZordinalNE"></div>
+											<div class="ptzGraphic" layoutR="47 47 7 7" svgid="PTZordinalNW"></div>
+											<div class="ptzGraphic" layoutR="47 136 7 7" svgid="PTZordinalSW"></div>
+											<div class="ptzGraphic" layoutR="136 136 7 7" svgid="PTZordinalSE"></div>
+										</div>
+										<div class="ptzGraphicContainer" uisize="medium">
+											<div class="ptzGraphic ptzBackground" layoutR="0 0 155 155" svgid="PTZbackground"></div>
+											<div class="ptzGraphic" layoutR="2 2 151 151" svgid="PTZoutsideRing"></div>
+											<div class="ptzGraphic" layoutR="55 43 45 21" svgid="PTZzoomIn"></div>
+											<div class="ptzGraphic" layoutR="55 91 45 21" svgid="PTZzoomOut"></div>
+											<div class="ptzGraphic" layoutR="91 55 21 45" svgid="PTZfocusNear"></div>
+											<div class="ptzGraphic" layoutR="43 55 21 45" svgid="PTZfocusFar"></div>
+											<div class="ptzGraphic" layoutR="64 64 27 27" svgid="PTZstop"></div>
+											<div class="ptzGraphic" layoutR="68 20 19 12" svgid="PTZcardinalUp"></div>
+											<div class="ptzGraphic" layoutR="123 68 12 19" svgid="PTZcardinalRight"></div>
+											<div class="ptzGraphic" layoutR="68 123 19 12" svgid="PTZcardinalDown"></div>
+											<div class="ptzGraphic" layoutR="20 68 12 19" svgid="PTZcardinalLeft"></div>
+											<div class="ptzGraphic" layoutR="111 38 6 6" svgid="PTZordinalNE"></div>
+											<div class="ptzGraphic" layoutR="38 38 6 6" svgid="PTZordinalNW"></div>
+											<div class="ptzGraphic" layoutR="38 111 6 6" svgid="PTZordinalSW"></div>
+											<div class="ptzGraphic" layoutR="111 111 6 6" svgid="PTZordinalSE"></div>
+										</div>
+										<div class="ptzGraphicContainer" uisize="small">
+											<div class="ptzGraphic ptzBackground" layoutR="0 0 125 125" svgid="PTZbackground"></div>
+											<div class="ptzGraphic" layoutR="2 2 121 121" svgid="PTZoutsideRing"></div>
+											<div class="ptzGraphic" layoutR="44 35 37 17" svgid="PTZzoomIn"></div>
+											<div class="ptzGraphic" layoutR="44 73 37 17" svgid="PTZzoomOut"></div>
+											<div class="ptzGraphic" layoutR="73 44 17 37" svgid="PTZfocusNear"></div>
+											<div class="ptzGraphic" layoutR="35 44 17 37" svgid="PTZfocusFar"></div>
+											<div class="ptzGraphic" layoutR="51 51 23 23" svgid="PTZstop"></div>
+											<div class="ptzGraphic" layoutR="55 16 15 10" svgid="PTZcardinalUp"></div>
+											<div class="ptzGraphic" layoutR="99 55 10 15" svgid="PTZcardinalRight"></div>
+											<div class="ptzGraphic" layoutR="55 99 15 10" svgid="PTZcardinalDown"></div>
+											<div class="ptzGraphic" layoutR="16 55 10 15" svgid="PTZcardinalLeft"></div>
+											<div class="ptzGraphic" layoutR="90 31 4 4" svgid="PTZordinalNE"></div>
+											<div class="ptzGraphic" layoutR="31 31 4 4" svgid="PTZordinalNW"></div>
+											<div class="ptzGraphic" layoutR="31 90 4 4" svgid="PTZordinalSW"></div>
+											<div class="ptzGraphic" layoutR="90 90 4 4" svgid="PTZordinalSE"></div>
+										</div>
+									</div>
+								</div>
+								<div id="ptzPresetsContent">
+									<div class="fiveByTwoButtonSet leftBarInnerBox ptzPresets10">
+										<div class="squareButton ptzpreset" presetnum="1"></div>
+										<div class="squareButton ptzpreset" presetnum="2"></div>
+										<div class="squareButton ptzpreset" presetnum="3"></div>
+										<div class="squareButton ptzpreset" presetnum="4"></div>
+										<div class="squareButton ptzpreset" presetnum="5"></div>
+										<div class="squareButton ptzpreset" presetnum="6"></div>
+										<div class="squareButton ptzpreset" presetnum="7"></div>
+										<div class="squareButton ptzpreset" presetnum="8"></div>
+										<div class="squareButton ptzpreset" presetnum="9"></div>
+										<div class="squareButton ptzpreset" presetnum="10"></div>
+									</div>
+									<div class="fiveByTwoButtonSet leftBarInnerBox ptzPresets20">
+										<div class="squareButton ptzpreset" presetnum="11"></div>
+										<div class="squareButton ptzpreset" presetnum="12"></div>
+										<div class="squareButton ptzpreset" presetnum="13"></div>
+										<div class="squareButton ptzpreset" presetnum="14"></div>
+										<div class="squareButton ptzpreset" presetnum="15"></div>
+										<div class="squareButton ptzpreset" presetnum="16"></div>
+										<div class="squareButton ptzpreset" presetnum="17"></div>
+										<div class="squareButton ptzpreset" presetnum="18"></div>
+										<div class="squareButton ptzpreset" presetnum="19"></div>
+										<div class="squareButton ptzpreset" presetnum="20"></div>
+									</div>
+									<div class="fiveByTwoButtonSet leftBarInnerBox ptzPresets30">
+										<div class="squareButton ptzpreset" presetnum="21"></div>
+										<div class="squareButton ptzpreset" presetnum="22"></div>
+										<div class="squareButton ptzpreset" presetnum="23"></div>
+										<div class="squareButton ptzpreset" presetnum="24"></div>
+										<div class="squareButton ptzpreset" presetnum="25"></div>
+										<div class="squareButton ptzpreset" presetnum="26"></div>
+										<div class="squareButton ptzpreset" presetnum="27"></div>
+										<div class="squareButton ptzpreset" presetnum="28"></div>
+										<div class="squareButton ptzpreset" presetnum="29"></div>
+										<div class="squareButton ptzpreset" presetnum="30"></div>
+									</div>
+									<div class="fiveByTwoButtonSet leftBarInnerBox ptzPresets40">
+										<div class="squareButton ptzpreset" presetnum="31"></div>
+										<div class="squareButton ptzpreset" presetnum="32"></div>
+										<div class="squareButton ptzpreset" presetnum="33"></div>
+										<div class="squareButton ptzpreset" presetnum="34"></div>
+										<div class="squareButton ptzpreset" presetnum="35"></div>
+										<div class="squareButton ptzpreset" presetnum="36"></div>
+										<div class="squareButton ptzpreset" presetnum="37"></div>
+										<div class="squareButton ptzpreset" presetnum="38"></div>
+										<div class="squareButton ptzpreset" presetnum="39"></div>
+										<div class="squareButton ptzpreset" presetnum="40"></div>
+									</div>
+								</div>
+								<div id="ptzIrBrightnessContrast" style="display: none;">
+									<div class="fiveByOneButtonSet leftBarInnerBox">
+										<div class="squareButton noborder dropdownTrigger" name="ptzIR" title="Infrared"><svg class="icon noflip"><use xlink:href="#svg_mio_lightbulb"></use></svg><span id="irButtonText"></span><div id="irButtonLabel" class="invisibleLabel"></div></div>
+										<div class="squareButton noborder spacer"></div>
+										<div class="squareButton noborder dropdownTrigger" name="ptzBrightness" title="Brightness"><svg class="icon noflip"><use xlink:href="#svg_mio_brightness"></use></svg><div id="brightnessButtonLabel" class="invisibleLabel"></div></div>
+										<div class="squareButton noborder spacer"></div>
+										<div class="squareButton noborder dropdownTrigger" name="ptzContrast" title="Contrast"><svg class="icon noflip stroke"><use xlink:href="#svg_stroke_contrast"></use></svg><div id="contrastButtonLabel" class="invisibleLabel"></div></div>
+									</div>
+								</div>
+								<div id="ptzHomeContainer" style="display: none;">
+									<div class="fiveByOneButtonSet leftBarInnerBox">
+										<div id="ptzHome" class="squareButton fiveByOneButtonSet" title="Sends a PTZ home command to the camera.  Results may vary."><svg class="icon noflip"><use xlink:href="#svg_mio_home"></use></svg><div id="homeButtonLabel">PTZ Home</div></div>
+									</div>
+								</div>
+							</div>
+						</div>
+						<div id="profileStatusBox" class="leftBarBox">
+							<div class="leftBarHeading collapsibleTrigger" collapsibleid="profileStatus">Profile Status</div>
+							<div class="leftBarInnerBox">
+								<div class="oneByTwoSquareButton" id="schedule_lock_button"><div class="squareButtonIcon"><svg class="icon" id="schedule_lock_icon"><use xlink:href="#svg_x5F_RunProfile"></use></svg></div></div>
+								<div class="fourByTwoButtonSet">
+									<div class="squareButton profilebtn" profilenum="0" title="Inactive profile" selColor="inherit">~</div>
+									<div class="squareButton profilebtn" profilenum="1" title="Profile 1" selColor="#00FF00">1</div>
+									<div class="squareButton profilebtn" profilenum="2" title="Profile 2" selColor="#0097F0">2</div>
+									<div class="squareButton profilebtn" profilenum="3" title="Profile 3" selColor="#FF0000">3</div>
+									<div class="squareButton profilebtn" profilenum="4" title="Profile 4" selColor="#FFFF00">4</div>
+									<div class="squareButton profilebtn" profilenum="5" title="Profile 5" selColor="#FF8800">5</div>
+									<div class="squareButton profilebtn" profilenum="6" title="Profile 6" selColor="#FF00FF">6</div>
+									<div class="squareButton profilebtn" profilenum="7" title="Profile 7" selColor="#00FFFF">7</div>
+								</div>
+							</div>
+						</div>
+						<div id="globalScheduleBox" class="leftBarBox">
+							<div class="leftBarHeading collapsibleTrigger" collapsibleid="schedule">Schedule</div>
+							<div class="dropdownBox" name="schedule"></div>
+						</div>
+						<div class="leftBarBox">
+							<div class="leftBarHeading collapsibleTrigger" collapsibleid="currentGroup">Current Group</div>
+							<div class="dropdownBox" name="currentGroup"></div>
+						</div>
+						<div class="leftBarBox" style="padding-bottom: 3px;">
+							<div class="leftBarHeading collapsibleTrigger" collapsibleid="streamingQuality">Streaming Quality</div>
+							<div class="dropdownBox" name="streamingQuality"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div id="layoutleftRecordings">
+			<div id="layoutLeftRecordingsControls">
+				<div class="leftBarTopPadding"></div>
+				<div class="leftBarBox">
+					<div class="leftBarHeading collapsibleTrigger" id="recordingsFilterByHeading" collapsibleid="filterRecordings">Filter by:</div>
+					<div>
+						<div class="dropdownBox" name="currentGroup"></div>
+						<div class="standardLeftBarBoxSize" id="dateRange" onclick="dateFilter.OpenDatePicker(this);"><svg class="icon calendarIcon"><use xlink:href="#svg_x5F_Calendar2"></use></svg><span id="dateRangeLabel" class="oneLine">All Recent</span></div>
+						<div class="dropdownBox" name="dbView"></div>
+					</div>
+				</div>
+				<div class="clipListTopDateWrapper">
+					<div id="clipListTopDate" class="datetile" style="position:relative;margin-bottom:0px" title="Click to scroll to the top" onclick="clipLoader.ScrollToTop()">...</div>
+				</div>
+				<!--<div style="height:4px;">Margin-bottom doesn't get counted correctly by the resize algorithm</div>-->
+			</div>
+			<div id="clipsbodyWrapper">
+				<div id="clipsbody">
+				</div>
+			</div>
+		</div>
+		<div id="layoutleftExport">
+			<div id="layoutleftExportScrollableWrapper">
+				<div id="layoutleftExportScrollable">
+				</div>
+			</div>
+		</div>
+		<div id="statusArea">
+			<div id="stoplightBtn" title="Control Blue Iris's Shield state with this button. Right-click to enable or disable button.">
+				<div id="stoplightRed"><svg class="icon noflip"><use xlink:href="#svg_shield"></use></svg></div>
+				<div id="stoplightYellow"><svg class="icon noflip"><use xlink:href="#svg_shield"></use></svg></div>
+				<div id="stoplightGreen"><svg class="icon noflip"><use xlink:href="#svg_shield"></use></svg></div>
+			</div>
+			<div class="serverStatusLabel" collapsibleid="serverStatus">
+				Server Status<div class="serverStatusSmallIcon">
+					<div class="statusBar statusTiny" name="cpu"></div>
+					<div class="statusBar statusTiny" name="mem"></div>
+					<div class="statusBar statusTiny" name="disk"></div>
+					<div class="statusBar statusTiny" name="fps"></div>
+				</div>
+			</div>
+			<div class="statusBarsMain">
+				<div class="statusBar" name="cpu" label="CPU" defaultAmountText="0%">
+				</div>
+				<div class="statusBar" name="mem" label="MEM" defaultAmountText="0%">
+				</div>
+				<div class="statusBar clickableStatusBar" name="disk" label="DISK" defaultAmountText="0%" onclick="statusLoader.diskUsageClick();">
+				</div>
+				<div class="statusBar" name="fps" label="FPS" defaultAmountText="0">
+				</div>
+			</div>
+		</div>
+	</div>
+	<div id="layoutbody">
+		<div id="camimg_wrapper"></div>
+		<div id="camimg_store"></div>
+		<div id="camimg_loading" class="camimg_loading"><div id="camimg_loading_anim" class="camimg_loading_anim spin1s"><svg class="icon noflip stroke"><use xlink:href="#svg_stroke_loading_circle"></use></svg></div></div>
+		<div id="camimg_false_loading" class="camimg_loading"><div id="camimg_false_loading_anim" class="camimg_loading_anim spin1s"><svg class="icon noflip stroke"><use xlink:href="#svg_stroke_loading_circle"></use></svg></div></div>
+		<div id="camimg_centerIconBackground"><svg class="icon"><use xlink:href="#svg_x5F_PTZbackground"></use></svg></div>
+		<div id="camimg_playIcon"><svg class="icon"><use xlink:href="#svg_x5F_Play"></use></svg></div>
+		<div id="camimg_pauseIcon"><svg class="icon"><use xlink:href="#svg_x5F_Pause"></use></svg></div>
+		<div id="cornerStatusIcons"></div>
+		<div id="playbackHeader" style="display: none;">
+			<div id="closeClipLeft" title="Close clip"><svg class="icon noflip stroke"><use xlink:href="#svg_stroke_closeBtn"></use></svg></div>
+			<div id="clipNameHeading"></div>
+		</div>
+		<div id="playbackControls" style="display: none;">
+			<div id="serverTimeLimits" style="display: none;">
+				<div id="sessionLimitClock">Session Limit: ...</div>
+				<div id="dailyLimitClock">Daily Limit: ...</div>
+			</div>
+			<div id="exportOffsetWrapper">
+				<div id="exportOffsetStart"></div>
+				<div id="exportOffsetEnd"></div>
+			</div>
+			<div id="seekBarWrapper">
+				<div class="verticalAlignHelper"></div>
+				<div id="seekBarMain"><div id="seekBarLeft"></div><div id="seekBarHighlight"></div></div>
+				<div id="seekBarHandle"></div>
+			</div>
+			<div id="pcButtonContainer">
+				<div class="pcButton hideWhenLive" id="pcPause" onclick="videoPlayer.Playback_Pause()" title="Pause">
+					<svg class="icon"><use xlink:href="#svg_x5F_Pause"></use></svg>
+				</div>
+				<div class="pcButton hideWhenLive" id="pcPlay" onclick="videoPlayer.Playback_Play()" style="display: none;" title="Play">
+					<svg class="icon"><use xlink:href="#svg_x5F_Play"></use></svg>
+				</div>
+				<div class="pcButton hideWhenLive" onclick="videoPlayer.Playback_PreviousClip()" title="Previous Clip" id="pcPrevClip"><svg class="icon"><use xlink:href="#svg_x5F_SkipBack"></use></svg></div>
+				<div class="pcButton hideWhenLive" onclick="videoPlayer.Playback_NextClip()" title="Next Clip" id="pcNextClip"><svg class="icon"><use xlink:href="#svg_x5F_SkipForward"></use></svg></div>
+				<div class="pcButton hideWhenLive hidden skipbtn stdSkipBtn" onclick="BI_Hotkey_SkipBack()" title="Skip Back" id="pcSkipBack"><svg class="icon noflip"><use xlink:href="#svg_mio_replay"></use></svg><div id="lblSkipBack" class="centerText"></div></div>
+				<div class="pcButton hideWhenLive hidden skipbtn stdSkipBtn" onclick="BI_Hotkey_SkipAhead()" title="Skip Ahead" id="pcSkipAhead"><svg class="icon noflip invertv"><use xlink:href="#svg_mio_replay"></use></svg><div id="lblSkipAhead" class="centerText"></div></div>
+				<div class="pcButton hideWhenLive hidden skipbtn" onclick="BI_Hotkey_SkipBack1Frame()" title="Skip Back 1 Frame" id="pcSkipBack1Frame"><svg class="icon noflip"><use xlink:href="#svg_mio_replay"></use></svg><div class="centerText">1</div></div>
+				<div class="pcButton hideWhenLive hidden skipbtn" onclick="BI_Hotkey_SkipAhead1Frame()" title="Skip Ahead 1 Frame" id="pcSkipAhead1Frame"><svg class="icon noflip invertv"><use xlink:href="#svg_mio_replay"></use></svg><div class="centerText">1</div></div>
+				<div id="volumeBar" class="audioTemporarilyUnavailable">
+					<div id="pcVolume" class="off">
+						<svg class="icon noflip off"><use xlink:href="#svg_mio_volumeOff"></use></svg>
+						<svg class="icon noflip mute"><use xlink:href="#svg_mio_volumeMute"></use></svg>
+						<svg class="icon noflip down"><use xlink:href="#svg_mio_volumeDown"></use></svg>
+						<svg class="icon noflip up"><use xlink:href="#svg_mio_volumeUp"></use></svg>
+					</div>
+					<div class="statusBar" name="volume" label="" defaultAmountText="">
+					</div>
+				</div>
+				<div id="playbackProgressText" class="pcText"></div>
+				<div id="playbackFrameTimestamp" class="pcText hideWhenLive"></div>
+				<div id="clipFullscreenButton" class="pcButton rightSide" title="Full Screen"><svg class="icon"><use xlink:href="#svg_mio_Fullscreen"></use></svg></div>
+				<div id="clipExitFullscreenButton" class="pcButton rightSide fullscreenButtonHidden" title="Exit Full Screen"><svg class="icon"><use xlink:href="#svg_mio_FullscreenExit"></use></svg></div>
+				<div id="clipMaximizeButton" class="pcButton rightSide" title="Maximize Video"><svg class="icon"><use xlink:href="#svg_mio_expand"></use></svg></div>
+				<div id="clipExitMaximizeButton" class="pcButton rightSide" title="Exit Maximize Video"><svg class="icon"><use xlink:href="#svg_mio_collapse"></use></svg></div>
+				<div id="clipPictureInPictureButton" class="pcButton rightSide" title="Toggle Picture-in-Picture"><svg class="icon noflip"><use xlink:href="#svg_mio_pip"></use></svg></div>
+				<div id="clipExportButton" class="pcButton rightSide hideWhenLive" title="Export" onclick="clipLoader.ExportCurrentClip()"><svg class="icon noflip"><use xlink:href="#svg_mio_launch"></use></svg></div>
+				<a id="clipDownloadButton" class="pcButton rightSide hideWhenLive" href="javascript:void(0)" title="Download Clip" target="_blank"><svg class="icon"><use xlink:href="#svg_x5F_Download"></use></svg></a>
+				<div id="clipFlagButton" class="pcButton rightSide hideWhenLive" onclick="clipLoader.FlagCurrentClip()" title="Flag/Unflag"><svg class="icon"><use xlink:href="#svg_x5F_Flag"></use></svg></div>
+				<div id="clipDeleteButton" class="pcButton hidden rightSide hideWhenLive" onclick="clipLoader.DeleteCurrentClip()" title="Delete"><svg class="icon"><use xlink:href="#svg_x5F_Error"></use></svg></div>
+				<div id="playbackSettingsButton" class="pcButton rightSide" onclick="playbackControls.OpenSettingsPanel()"><svg class="icon"><use xlink:href="#svg_x5F_Settings"></use></svg><div id="playbackSettingsQualityMark"></div></div>
+				<div id="prioritizeTriggeredButton" class="pcButton rightSide showWhenLive prioritizeTriggeredButton" onclick="videoPlayer.PrioritizeTriggeredToggle()" title="Auto-Maximize&#10;&#10;When live viewing, automatically maximize cameras that are triggered or detecting motion.&#10;&#10;Click button to toggle.  Configure feature at UI Settings > Video Player."><svg class="icon"><use xlink:href="#svg_x5F_Alert"></use></svg></div>
+				<div id="playbackSpeedText" class="pcText rightSide hideWhenLive" onclick="playbackControls.OpenSpeedPanel()" title="Playback Speed"></div>
+			</div>
+		</div>
+		<div id="seekhint" class="hidden">
+			<img id="seekhint_img" src="" />
+			<canvas id="seekhint_canvas">HTML5 canvas not supported</canvas>
+			<div id="seekhint_loading"><div id="seekhint_loading_anim" class="spin1s"><svg class="icon noflip stroke"><use xlink:href="#svg_stroke_loading_circle"></use></svg></div></div>
+			<div id="seekhint_helper">Pause video to see preview.</div>
+			<div id="seekhint_label"></div>
+		</div>
+		<div id="cameraLabelsWrapper"></div>
+	</div>
+	<div id="layoutbottom">
+		<div id="layoutbottomTimeline">
+			<clip-timeline />
+		</div>
+	</div>
+	<div id="preloadcontainer" style="display: none">
+		<img mysrc="ui3/LoadingImage.png" />
+		<img mysrc="ui3/noimage.png" />
+	</div>
+	<div id="zoomhint" style="display: none">
+	</div>
+	<div id="loginDialog" style="display: none">
+		<div style="margin-top: 10px;">This feature requires a user account with more permissions.</div>
+		<div class="section monospace">User: <input type="text" varname="user" placeholder="Username" /></div>
+		<div class="monospace" style="margin-top: 5px;">Pass: <input type="password" varname="pass" placeholder="Password" onkeypress="return sessionManager.PwKeypress(this,event)" /></div>
+		<div class="lesserSection">
+			<div class="customCheckboxWrapper">
+				<input id="cbRememberMe" type="checkbox" class="sliderCb" onchange="sessionManager.AdminLoginRememberMeChanged()" />
+				<label for="cbRememberMe"><span class="ui"></span>Log in automatically<div class="customCheckboxSpacer"></div></label>
+			</div>
+		</div>
+		<div class="lesserSection"><input type="button" id="btnLogin" value="Log in" onclick="sessionManager.DoAdministratorDialogLogin()" /></div>
+	</div>
+	<div id="aboutDialog" class="selectable" style="display: none">
+		<div>
+			UI3 version <span id="ui_version_label"></span>, Blue Iris version: <span id="bi_version_label"></span>
+			<picture class="about_icon">
+				<source srcset="ui3/logos/overlay96.webp" type="image/webp">
+				<source srcset="ui3/logos/overlay96.png" type="image/jpeg">
+				<img class="about_icon" src="ui3/logos/overlay96.png" alt="Blue Iris">
+			</picture>
+		</div>
+		<div class="section">UI3 is a web interface for <a target="_blank" href="http://blueirissoftware.com/">Blue Iris</a></div>
+		<div id="optionalFeaturesNotSupported" class="section">
+			Some optional features are not supported in this browser:<br />
+		</div>
+		<div id="videoPlayersSupported" class="section">
+			The following video players are supported in this browser:<br />
+		</div>
+		<div class="section">
+			UI3 is designed for use with:
+		</div>
+		<div style="margin-top:10px;">
+			<a target="_blank" href="https://www.google.com/chrome"><div class="browserIcon"><svg class="icon noflip"><use xlink:href="#svg_chrome"></use></svg></div>Google Chrome</a>
+		</div>
+		<div style="margin-top:10px;">
+			<a target="_blank" href="https://www.microsoft.com/edge/"><div class="browserIcon"><svg class="icon noflip"><use xlink:href="#edge_logo"></use></svg></div>Edge (Chromium-based)</a>
+		</div>
+		<div style="margin:10px 0px 20px 0px;">
+			Other browsers, including mobile versions of those listed above, may or may not provide full functionality.
+		</div>
+		<hr />
+		<div style="margin-top:20px;">
+			UI3 is built primarily by <a target="_blank" href="https://ipcamtalk.com/members/bp2008.28/">bp2008</a>, with the original visual design by <a target="_blank" href="https://ipcamtalk.com/members/ruppmeister.5023/">ruppmeister</a>.
+		</div>
+		<div class="section">
+			UI3 is available under the <a target="_blank" href="https://www.gnu.org/licenses/lgpl-3.0.en.html">GNU Lesser General Public License V3</a>.
+		</div>
+		<div class="section">
+			GitHub: <a target="_blank" href="https://github.com/bp2008/ui3">https://github.com/bp2008/ui3</a>
+		</div>
+	</div>
+	<div id="datePickerDialog" style="display: none;">
+		<div style="margin-bottom:15px;">Filter by start and end dates below:</div>
+		<div class="calendarWrapper">
+			<div class="calendarTitle">Start Date</div>
+			<div id="datePicker1Container" class="calendarContainer"></div>
+		</div>
+		<div class="calendarWrapper">
+			<div class="calendarTitle">End Date</div>
+			<div id="datePicker2Container" class="calendarContainer"></div>
+		</div>
+	</div>
+	<script>
+		(function ()
+		{
+			var imgs = document.getElementsByTagName("img");
+			for (var i = 0; i < imgs.length; i++)
+			{
+				var src = imgs[i].getAttribute("mysrc");
+				if (src)
+					imgs[i].src = src + '?v=' + combined_version + local_bi_session_arg;
+			}
+		})();
+		document.write('<script src="ui3/libs-ui3.js?v=' + combined_version + local_bi_session_arg + '"><\/script>'
+			+ '<script src="ui3/ui3.js?v=' + combined_version + local_bi_session_arg + '"><\/script>'
+			+ '<script src="ui3/ui3-local-overrides.js?v=' + combined_version + local_bi_session_arg + '"><\/script>');
+
+		if (!(window.CSS && window.CSS.supports && window.CSS.supports('--fake-var', 0)))
+		{
+			document.write('<script src="ui3/css-vars-ponyfill.min.js?v=' + combined_version + local_bi_session_arg + '"><\/script>');
+			document.addEventListener("DOMContentLoaded", function ()
+			{
+				if (typeof cssVars === "function")
+					cssVars();
+			});
+		}
+	</script>
+</body>
+</html>

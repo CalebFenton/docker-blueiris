@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<head>
+	<meta http-equiv="X-UA-Compatible" content="IE=edge">
+	<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+	<!-- The above 2 meta tags *must* come first in the head; any other head content must come *after* these tags -->
+	<meta name="description" content="Blue Iris UI3 Help">
+	<meta name="author" content="bp2008">
+	<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+
+	<title>UI3 Help</title>
+
+	<style type="text/css">
+		table.borderCells td,
+		table.borderCells th
+		{
+			border: 1px solid black;
+			padding: 1px 2px;
+		}
+		.urlParameterAlias
+		{
+			margin-left: 10px;
+			color: #808080;
+			font-style: italic;
+		}
+	</style>
+
+	<script type="text/javascript">
+		var local_bi_session = "%%SESSION%%";
+		var local_bi_session_arg = navigator.cookieEnabled ? "" : "&session=" + local_bi_session;
+		var bi_version = "%%VERSION%%";
+		document.write('<link href="css/bootstrap.min.css?v=' + bi_version + local_bi_session_arg + '" rel="stylesheet" />'
+			+ '<link href="css/help.css?v=' + bi_version + local_bi_session_arg + '" rel="stylesheet" />');
+	</script>
+</head>
+
+<body>
+	<header>
+		<nav id="navEle" class="navbar navbar-default navbar-static-top">
+			<!--navbar-fixed-top-->
+			<div class="container">
+				<div class="navbar-header">
+					<button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar" aria-expanded="false" aria-controls="navbar">
+						<span class="sr-only">Toggle navigation</span>
+						<span class="icon-bar"></span>
+						<span class="icon-bar"></span>
+						<span class="icon-bar"></span>
+					</button>
+					<a class="navbar-brand" href="#overview">UI3 Help</a>
+				</div>
+				<div id="navbar" class="navbar-collapse collapse" role="navigation">
+					<ul class="nav navbar-nav nav-pills">
+						<li class="active"><a data-toggle="pill" href="#overview" id="nav-overview">Overview</a></li>
+						<li><a data-toggle="pill" href="#cameralayout" id="nav-cameralayout">Camera Layout</a></li>
+						<li><a data-toggle="pill" href="#recordings" id="nav-recordings">Recordings</a></li>
+						<li><a data-toggle="pill" href="#videoplayer" id="nav-videoplayer">Video Player</a></li>
+						<li class="dropdown">
+							<a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">More Topics<span class="caret"></span></a>
+							<ul class="dropdown-menu">
+								<li><a data-toggle="pill" href="#cameraproperties" id="nav-cameraproperties">Camera Properties</a></li>
+								<li><a data-toggle="pill" href="#export" id="nav-export">Exporting Video</a></li>
+								<li><a data-toggle="pill" href="#hlsstreams" id="nav-hlsstreams">HLS Streams</a></li>
+								<li><a data-toggle="pill" href="#mainmenu" id="nav-mainmenu">Main Menu</a></li>
+								<li><a data-toggle="pill" href="#nerdstats" id="nav-nerdstats">Stats for Nerds</a></li>
+								<li><a data-toggle="pill" href="#tips" id="nav-tips">Tips</a></li>
+								<li><a data-toggle="pill" href="#extensions" id="nav-extensions">UI Extensions</a></li>
+								<li><a data-toggle="pill" href="#urlparameters" id="nav-urlparameters">URL Parameters</a></li>
+								<!--li role="separator" class="divider"></li>
+								<li class="dropdown-header">Nav header</li>
+								<li><a href="#">Separated link</a></li>
+								<li><a href="#">One more separated link</a></li>-->
+							</ul>
+						</li>
+					</ul>
+				</div><!--/#navbar -->
+			</div><!--/.container -->
+		</nav>
+	</header>
+
+	<div class="container">
+		<div class="row">
+			<div class="baseContainer">
+				<div class="tab-content">
+					<div class="tab-pane active" id="overview" role="tabpanel" aria-labelledby="nav-overview">
+						<h2>UI3 Help Overview</h2>
+						<p>Please choose a section from the navigation menu above.</p>
+						<h2>Support</h2>
+						<p>If you need support with UI3, the best place to go for help is <a href="https://ipcamtalk.com/forums/blue-iris.30/">the Blue Iris section of the IpCamTalk forum</a>.</p>
+						<p>This interface was developed by community member <a target="_blank" href="https://ipcamtalk.com/members/bp2008.28/">bp2008</a> from <a href="https://ipcamtalk.com/">IpCamTalk</a>.</p>
+					</div>
+					<div class="tab-pane" id="videoplayer" role="tabpanel" aria-labelledby="nav-videoplayer">
+						<h1>Video Player</h1>
+						<p class="bg-info padded-info"><b>Troubleshooting Tip</b><br /><br />If you experience choppy audio in UI3, or have trouble playing clips that were recorded in the MP4 format, try installing the <b>K-Lite Codec Pack</b> on your <b>Blue Iris server</b>.  Beware of bundled adware when installing any codec pack.  You can safely and conveniently get K-Lite Codecs from <b><a href="https://ninite.com/">ninite.com</a></b>.</p>
+						<h2>Audio Streaming</h2>
+						<p>UI3 supports one-way audio streaming from Blue Iris to UI3.  Audio playback is only available when streaming H.264 video, due to the streaming methods used.</p>
+						<h2>Video Codecs <small>(Streaming Quality)</small></h2>
+						<p>UI3 can stream video using two different compression methods: <b>H.264</b> and <b>Jpeg</b>.  H.264 is more efficient with network bandwidth, and usually achieves a higher frame rate, making it the most desirable choice in most circumstances.  H.264 is the default streaming method in browsers which support it.  Jpeg streaming is simpler and can be used in all browsers capable of running UI3.</p>
+						<h3>H.264</h3>
+						<p>UI3 can stream H.264 video if your browser supports it.  You can check for H.264 compatibility by looking in the Streaming Quality dropdown list.  If the only options there are "Jpeg" then your browser is not compatible.  If H.264 is available, it often provides a much smoother video stream.</p>
+						<ul>
+							<li>If your viewing device has insufficient CPU or network speed, H.264 video will become increasingly delayed.  If this happens, UI3 will warn you and suggest that you try a different Streaming Quality option.</li>
+						</ul>
+						<h3>H.264 Streaming Profiles</h3>
+						<h4>Server-side profiles</h4>
+						<p>Blue Iris provides three streaming profiles called simply "Streaming 0", "Streaming 1", and "Streaming 2".  To find these in Blue Iris's local console, open <b>Blue Iris Options</b> &gt; <b>Web server</b> tab &gt; <b>Advanced</b>.  Here, you can <b>configure</b> each of the encoder profiles.</p>
+						<p class="bg-info padded-info">The three H.264 encoder profiles are shared between Blue Iris's mobile apps, UI3, and even the legacy default.htm and jpegpull.htm pages.</p>
+						<h4>Client-side profiles</h4>
+
+						<div class="row">
+							<div class="col-sm-5">
+								<p>Prior to June 2018, UI3 simply exposed the three server-side profiles as choices in the Streaming Quality menu, and that was that.</p>
+								<p>Thanks to improvements in Blue Iris, UI3 is now able to provide more-intuitive quality choices such as "1080p", "720p", and "480p".  These quality choices each represent a fully-configurable streaming profile, which you can edit by opening the <a href="#mainmenu">Main Menu</a> and choosing the <b>Streaming Profiles</b> option.</p>
+								<p>Each of UI3's streaming profiles must be based on one of the server-side profiles.  All encoding parameters are inherited from this profile unless otherwise specified in UI3.  UI3's default profiles are all based on <b>Streaming 0</b>, but they override the <b>Max Frame Width</b>, <b>Max Frame Height</b>, and <b>Max Bit Rate</b> parameters.  Other parameters, such as <b>Quality</b>, are intentionally left blank so their values will be inherited from <b>Streaming 0</b>.</p>
+								<p>UI3 no longer includes <b>Streaming 0</b> or <b>Streaming 1</b> or <b>Streaming 2</b> as default quality choices.  If they are desired, they can be restored easily.  Simply create a new profile in UI3, give it a name, and base it on the desired server-side profile. Leave all the encoding parameters alone, and their values will be inherited from your chosen <b>Base Server Profile</b>.</p>
+								<p class="bg-info padded-info">If you want to share your profile changes with all browsers and devices, <a href="#extensions">see the "Quick Start" section of UI Extensions</a>.</p>
+							</div>
+							<div class="col-sm-7">
+								<img class="img-responsive" mysrc="img/ProfileEditor.png" alt="Screenshot of the UI3 profile editor" style="margin-bottom: 5px;" />
+							</div>
+						</div>
+						<h3>H.264 Profile Configuration Tips</h3>
+						<h4>Audio</h4>
+						<p>The audio codec setting has no effect on UI3.  UI3 only knows how to decode "mu-law" and that is what Blue Iris provides no matter what you set here.  It is therefore not an option in UI3's streaming profile system, but can be configured in Blue Iris's server-side profiles.</p>
+						<h4>Quality vs Bit Rate</h4>
+						<p>Blue Iris will encode up to your specified <b>Quality</b> level, automatically reducing quality if necessary to stay within the bit rate limit. For streaming, it is recommended to always use the <b>Limit bitrate</b> setting, otherwise the actual bit rate can get excessively high and in extreme cases this can cause decoding errors.</p>
+						<p>The default quality value (50) is already quite high, so setting it higher is almost never a good idea for remote streaming!  Actually, lower values like 20 can provide enormous bandwidth savings while retaining acceptable visual quality.</p>
+						<p>Lower bit rates work better with devices that have a slow CPU or slow network connection.</p>
+						<h4>Maximum keyframe interval (GOP)</h4>
+						<p>Also known as the i-frame interval.  For UI3, you should <b>set this as high as it goes</b> (300 at the time of this writing).</p>
+						<h4>Maximum B-frames between P-frames</h4>
+						<p>UI3 is not compatible with B-frames.  Keep this set to 0, though evidence suggests this setting has no effect anyway.</p>
+						<h4>Advanced &gt; Profile</h4>
+						<p>"high" profile is recommended for most users. "baseline" profile may reduce CPU requirements slightly at the cost of image quality.</p>
+						<h4>Advanced &gt; Preset</h4>
+						<ul>
+							<li>"ultrafast" - Lowest CPU usage and lowest image quality</li>
+							<li>"superfast" - A good balance between CPU usage and image quality</li>
+							<li>"veryfast" - Slightly better image quality at the cost of higher CPU usage <b>and some video delay</b></li>
+						</ul>
+						<h4>Zero frame latency</h4>
+						<p>Recommended to be enabled for best UI responsiveness. In testing, no perceptible difference was seen with this enabled or disabled.</p>
+						<h4>Resize output frame width x height</h4>
+						<p>This depends entirely on your personal preference for quality vs efficiency.  Lower resolutions are more efficient to work with.</p>
+						<h3>Jpeg Streaming</h3>
+						<p>Jpeg streaming is done by requesting Jpeg-compressed snapshots as quickly as possible.  It is not very efficient with network bandwidth and it can't achieve high frame rates over the internet.  However, being a simpler streaming method, it tends to "just work".  Jpeg streaming is capable of extremely high resolutions and excellent image quality.</p>
+						<p class="bg-warning padded-info"><b>Audio playback</b> is <b>not available</b> while streaming Jpeg snapshots.</p>
+						<h2>Context Menu</h2>
+						<p>If you right click (long-press on touchscreens) on a camera, a context menu appears.  The first 4 actions are specific to the current video stream, while most other options are specific to the camera you clicked on.  Here, blue icons indicate actions that take effect on the Blue Iris server and require <span class="label label-primary">Admin</span> privilege, while black icons indicate actions that occur in the web UI.</p>
+						<div class="row">
+							<div class="col-sm-3">
+								<img class="img-responsive" mysrc="img/CameraContextMenu.png" alt="Screenshot of clip list context menu" style="margin-bottom: 5px;" />
+							</div>
+							<div class="col-sm-9">
+								<div class="panel panel-info">
+									<div class="panel-heading">Live View Context Menu Actions</div>
+									<div class="panel-body">
+										<dl class="dl-horizontal">
+											<dt>Open image in new tab</dt>
+											<dd>Opens a snapshot of the current frame in a new tab.</dd>
+											<dt>Save image to disk</dt>
+											<dd>Downloads a high quality copy of the current frame.</dd>
+											<dt>Open HLS Stream</dt>
+											<dd>Opens a copy of the video stream using the <a href="#hlsstreams">HLS streaming protocol</a>.</dd>
+											<dt>Copy image address</dt>
+											<dd>Copies (to the clipboard) a URL for a high-quality jpeg snapshot from the current stream.  If you are viewing a clip, the URL will honor your playback position.</dd>
+											<dt>Camera Name</dt>
+											<dd>This item doesn't do anything.  It serves as a separator and indicator of which camera you clicked.</dd>
+											<dt>Maximize</dt>
+											<dd>Also called "Back to Group" if you are viewing a maximized camera, this item has the same effect as just clicking the camera would have had.</dd>
+											<dt>Trigger Now</dt>
+											<dd><span class="label label-primary">Admin</span> Triggers an alert for this camera in Blue Iris.</dd>
+											<dt>Start/Stop Recording</dt>
+											<dd><span class="label label-primary">Admin</span> Toggles manual recording for this camera in Blue Iris.</dd>
+											<dt>Snapshot in Blue Iris</dt>
+											<dd><span class="label label-primary">Admin</span> Instructs Blue Iris to save a snapshot for this camera.  The snapshot will appear in your clip list.</dd>
+											<dt>Restart Camera</dt>
+											<dd><span class="label label-primary">Admin</span> Instructs Blue Iris to restart this camera.  Useful mostly for debugging purposes or to fix streaming problems affecting just one camera.</dd>
+											<dt>Stats for nerds</dt>
+											<dd>Opens the <a href="#nerdstats">"Stats for nerds" panel</a>, containing low-level information about the current video and audio streams.</dd>
+											<dt>Properties</dt>
+											<dd><span class="label label-primary">Admin</span> Opens a <a href="#cameraproperties">properties panel</a> containing many options for this camera.</dd>
+										</dl>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="tab-pane" id="hlsstreams" role="tabpanel" aria-labelledby="nav-hlsstreams">
+						<h1>HLS Streams</h1>
+						<p>Blue Iris can stream any camera or group using the <abbr title="HTTP Live Stream">HLS</abbr> protocol.  Though it is not core functionality, UI3 provides the ability to consume these streams.</p>
+						<p>HLS has significant video delay, but that is configurable to some extent in Blue Iris's streaming profile configuration.</p>
+						<p>HLS streaming is only available for live video, but it works with individual cameras and groups alike.</p>
+						<h2>Streaming with HLS in UI3</h2>
+						<p>Right-click on any video stream and choose "Open HLS Stream".  A special video player called <a href="https://github.com/clappr/clappr">Clappr</a> will open in a dialog window.</p>
+						<p class="bg-info padded-info">If you right-click the HLS player, you have the option to "Open stream in New Tab".  Opening an HLS stream in a new tab actually opens a different page called "livestream.htm".</p>
+						<h2>livestream.htm</h2>
+						<p>One of the pages included with UI3 is "livestream.htm" which just plays an HLS stream from Blue Iris and does basically nothing else.  The page takes a single URL parameter "cam" with the short name of the camera or group you wish to view.  Example: <a href="../../livestream.htm?cam=index">livestream.htm?cam=index</a></p>
+						<p class="bg-info padded-info">If you omit the "cam" parameter, livestream.htm will attempt to load "index" (a.k.a. "all cameras" ).</p>
+					</div>
+					<div class="tab-pane" id="nerdstats" role="tabpanel" aria-labelledby="nav-nerdstats">
+						<h1>Stats for Nerds</h1>
+						<p>Inspired by YouTube's feature with the same name, UI3 has a "Stats for nerds" panel which shows an assortment of details about the video player.  This information can be useful for troubleshooting, but otherwise it is just fun to look at.</p>
+						<p>To access this panel, right-click on UI3's video player and choose the "Stats for nerds" option.</p>
+						<p><img class="img-responsive" mysrc="img/StatsForNerds.png" alt="Stats for nerds" /></p>
+						<div class="panel panel-info">
+							<div class="panel-heading">"Stats for nerds" item descriptions</div>
+							<div class="panel-body">
+								Many items in this panel only exist when streaming H.264. Other items may only exist while streaming Jpeg frames.<br /><br />
+								<dl class="dl-horizontal">
+									<dt>Viewport</dt>
+									<dd>The size of the screen area available for video playback. When using DPI scaling or browser zoom, the zoom ratio is also shown here.</dd>
+									<dt>Stream Resolution</dt>
+									<dd>The resolution of the current video stream.  Jpeg frames are dynamically adjusted to the ideal resolution to fit the viewport.</dd>
+									<dt>Native Resolution</dt>
+									<dd>The resolution of the current video stream.  Jpeg frames are dynamically adjusted to the ideal resolution to fit the viewport.</dd>
+									<dt>Seek Position</dt>
+									<dd>Shows either "LIVE" or the current playback position as a percentage of the clip.</dd>
+									<dt>Frame Offset</dt>
+									<dd>The timestamp of the last-rendered frame relative to the start of the streaming connection.</dd>
+									<dt>Frame Time</dt>
+									<dd><span class="label label-info">H.264</span> The approximate date and time when the last-rendered frame was originally captured.</dd>
+									<dt>Codecs</dt>
+									<dd>The current video and audio codecs.</dd>
+									<dt>Jpeg Loading Time</dt>
+									<dd><span class="label label-primary">JPEG</span> The amount of time it took to load the last jpeg frame.</dd>
+									<dt>Video Bit Rate</dt>
+									<dd><span class="label label-info">H.264</span> Measured bit rate of the video stream.</dd>
+									<dt>Audio Bit Rate</dt>
+									<dd><span class="label label-info">H.264</span> Measured bit rate of the audio stream.</dd>
+									<dt>Audio Buffer</dt>
+									<dd><span class="label label-info">H.264</span> The amount of audio (in milliseconds) which has been received but not yet played.  If this reaches 0, it means no audio is playing.</dd>
+									<dt>Frame Size</dt>
+									<dd><span class="label label-info">H.264</span> The size in bytes of the last video frame.</dd>
+									<dt>Inter-Frame Time</dt>
+									<dd><span class="label label-info">H.264</span> The time in milliseconds between frame renders.  If this graph jumps around a lot, it is evidence that the video stream is not smooth.  Many cameras don't capture frames at a constant interval when they aren't streaming at their maximum frame rate, so it isn't uncommon to see a pattern like 50ms, 50ms, 100ms, 50ms, 50ms, 100ms.</dd>
+									<dt>Frame Timing Error</dt>
+									<dd><span class="label label-info">H.264</span> This is the difference between the time a frame was supposed to be rendered and the time it was actually rendered.  The closer this is to zero, the better.</dd>
+									<dt>Network Delay</dt>
+									<dd><span class="label label-info">H.264</span> The estimated video delay caused by insufficient network speed.  Values of a few hundred milliseconds are completely normal and nothing to worry about.</dd>
+									<dt>Player Delay</dt>
+									<dd><span class="label label-info">H.264</span> The estimated video delay caused by insufficient CPU speed.  Values of a few hundred milliseconds are completely normal and nothing to worry about.  A small amount of player delay is often intentional in order to keep the Frame Timing Error as close to zero as possible.</dd>
+									<dt>Delayed Frames</dt>
+									<dd><span class="label label-info">H.264</span> The number of frames that have been received but not yet decoded and rendered.  This directly correlates with Player Delay and low values (0-2) are completely normal. A small number of delayed frames is often intentional in order to keep the Frame Timing Error as close to zero as possible.</dd>
+								</dl>
+							</div><!--/.panel-body -->
+						</div><!--/.panel -->
+					</div><!--/.tab-pane -->
+					<div class="tab-pane" id="urlparameters" role="tabpanel" aria-labelledby="nav-urlparameters">
+						<h1>URL Parameters</h1>
+						<p>Several URL parameters can change UI3's startup behavior. Each parameter has an alternative short name which can be used to create shorter URLs.</p>
+						<table class="table">
+							<thead>
+								<tr>
+									<th>Parameter</th>
+									<th>Effect</th>
+									<th>Example</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr>
+									<td>maximize=1<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">m=</span></td>
+									<td>UI3 loads with the left and top control bars hidden. This state persists between UI loads.</td>
+									<td><a href="../../ui3.htm?maximize=1" target="_blank">ui3.htm?maximize=1</a></td>
+								</tr>
+								<tr>
+									<td>maximize=0<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">m=</span></td>
+									<td>UI3 loads with the left and top control bars shown.</td>
+									<td><a href="../../ui3.htm?maximize=0" target="_blank">ui3.htm?maximize=0</a></td>
+								</tr>
+								<tr>
+									<td>tab=live<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">t=L</span></td>
+									<td>The "Live" tab is loaded.</td>
+									<td><a href="../../ui3.htm?tab=live" target="_blank">ui3.htm?tab=live</a></td>
+								</tr>
+								<tr>
+									<td>tab=clips<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">t=C</span></td>
+									<td>The "Clips" tab is loaded.</td>
+									<td><a href="../../ui3.htm?tab=clips" target="_blank">ui3.htm?tab=clips</a></td>
+								</tr>
+								<tr>
+									<td>clipview=X<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">v=</span></td>
+									<td>
+										The clip list view specified by X is selected upon UI startup. Possible values of X:
+										<code>all</code>,
+										<code>alerts</code>,
+										<code>new</code>,
+										<code>stored</code>,
+										<code>aux1</code>,
+										<code>aux2</code>,
+										<code>aux3</code>,
+										<code>aux4</code>,
+										<code>aux5</code>,
+										<code>aux6</code>,
+										<code>aux7</code>,
+										<code>flagged</code>,
+										<code>new.clipboard</code>,
+										<code>cancelled</code>,
+										<code>confirmed</code>,
+										<code>zonea</code>,
+										<code>zoneb</code>,
+										<code>zonec</code>,
+										<code>zoned</code>,
+										<code>zonee</code>,
+										<code>zonef</code>,
+										<code>zoneg</code>,
+										<code>zoneh</code>,
+										<code>dio</code>,
+										<code>onvif</code>,
+										<code>audio</code>,
+										<code>external</code>,
+										<code>memos</code>,
+										<code>archive</code>,
+										<code>export</code>
+									</td>
+									<td><a href="../../ui3.htm?clipview=alerts" target="_blank">ui3.htm?tab=clips&clipview=alerts</a></td>
+								</tr>
+								<tr>
+									<td>group=groupname<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">g=</span></td>
+									<td>The group with the specified name is loaded.</td>
+									<td><a href="../../ui3.htm?group=index" target="_blank">ui3.htm?group=index</a></td>
+								</tr>
+								<tr>
+									<td>cam=shortName<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">c=</span></td>
+									<td>The camera with the specified "Short name" is loaded.</td>
+									<td><a href="../../ui3.htm?cam=porch" target="_blank">ui3.htm?cam=porch</a></td>
+								</tr>
+								<tr>
+									<td>rec=ID[-MS]<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">r=</span></td>
+									<td>
+										<p>
+											Opens a specific clip at UI3 startup. The value should be the numeric portion of a clip's database ID. For example, a clip might have database ID <code>@21148130039</code>, so a "rec=" argument to open this clip would be <code>rec=21148130039</code>.  To open a clip at a specific time offset, append a hyphen and a number of milliseconds.  For example, to open the clip at its 10-second mark, use <code>rec=21148130039-10000</code>.
+										</p>
+										<p>
+											This parameter also loads the Clips tab at UI3 startup.
+										</p>
+										<p style="font-style: italic;">
+											To make it easy to share a link to a clip, this parameter is automatically entered into the address bar during clip playback.
+										</p>
+									</td>
+									<td><a href="../../ui3.htm?rec=21148130039-10000" target="_blank">ui3.htm?rec=21148130039-10000</a></td>
+								</tr>
+								<tr>
+									<td>streamingprofile=name<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">p=</span></td>
+									<td>
+										<p>
+											Selects a specific streaming profile at UI3 startup.  The value <code>name</code> must exactly match one of your streaming profiles.  Streaming profile names are case-sensitive and should be URL-encoded when used in a URL parameter.
+										</p>
+										<p id="streamingProfileListParagraph" style="display: none;">
+											This is a list of your streaming profiles which you may copy from:
+											<table class="borderCells">
+												<thead><tr><th>Profile</th><th>Name Parameter</th></tr></thead>
+												<tbody id="streamingProfileTbody"></tbody>
+											</table>
+										</p>
+									</td>
+									<td><a href="../../ui3.htm?streamingprofile=144p" target="_blank">ui3.htm?streamingprofile=144p</a></td>
+								</tr>
+							</tbody>
+						</table>
+						<div class="panel panel-info">
+							<div class="panel-heading">Multiple parameters can be combined</div>
+							<div class="panel-body">
+								Separate multiple parameters with "&amp;", like this: <a href="../../ui3.htm?tab=clips&cam=porch&maximize=1" target="_blank">ui3.htm?tab=clips&clipview=alerts&cam=porch&maximize=1</a>
+							</div>
+						</div>
+					</div>
+					<div class="tab-pane" id="extensions" role="tabpanel" aria-labelledby="nav-extensions">
+						<h1>UI Extensions</h1>
+						<p>Experienced web developers can extend UI3 with custom JavaScript and CSS.</p>
+						<p>Of course if you take the most obvious route and modify <code>ui3.js</code> and <code>ui3.css</code> files directly, you would have to re-apply your changes after every update! To solve this problem, UI3 attemps to load two files which do not exist in releases: <code>ui3-local-overrides.js</code> and <code>ui3-local-overrides.css</code>. You can create either or both of these files and place them in the "ui3" subdirectory of your Blue Iris installation's web root directory ("www").  These two files will be loaded after all the other script and style files, allowing you to conveniently override virtually any default functionality you wish, if you have the programming skills to do so.</p>
+						<h2>Examples</h2>
+						<p>For examples, see <a href="https://github.com/bp2008/ui3/wiki/Local-Overrides-Scripts-and-Styles">https://github.com/bp2008/ui3/wiki/Local-Overrides-Scripts-and-Styles</a></p>
+						<h2>Quick Start <small>- Globally Override Default Settings</small></h2>
+						<p>At the bottom of the UI Settings panel is an item called 'Create Script: "ui3-local-overrides.js"'.  This item is only visible if you have logged in to UI3 as a Blue Iris administrator.</p>
+						<p>When you click the "Download" link, your browser should download a copy of your current settings in the form of a ui3-local-overrides.js file.  If you move this file into your "ui3" subdirectory, then all users will receive your current settings by default.</p>
+						<p>If you want to customize the default values in this auto-generated file, you should first understand some things:</p>
+						<ul class="list-group">
+							<li class="list-group-item">
+								If you manually edit a setting's value in the ui3-local-overrides.js script, you should also increment the Generation number.  Each user (each web browser, really) will only adopt your new default value if the Generation associated with it is a higher number than the generation they had previously.
+								<br /><br />
+								If you make the change in your own web browser and re-download the ui3-local-overrides.js file, this will automatically increment all generation numbers.  Then you just need to replace your old overrides file with the new one.
+							</li>
+							<li class="list-group-item">If you want your default value to ALWAYS be reloaded when UI3 is loaded, set "Always Reload" to true.  Then, the Generation number does not matter, and your specified value will take effect every time UI3 is loaded regardless of how each user has configured it.</li>
+							<li class="list-group-item">To prevent a setting from appearing in the UI Settings panel, change "true" to "false" for the "Options Window" parameter.  Uncategorized settings don't appear in the options window anyway, and some items from the UI Settings panel aren't settings in the first place, but buttons (e.g. to forget saved credentials).</li>
+						</ul>
+					</div>
+					<div class="tab-pane" id="cameralayout" role="tabpanel" aria-labelledby="nav-cameralayout">
+						<h1>Camera Layout</h1>
+						<p>UI3 is unable to control your camera layout.  To change the camera layout, you must drag cameras around in Blue Iris's local console.</p>
+						<h2>Optimizing Group Frames</h2>
+						<p>The default group frame size may have a lot of empty black area, or the resolution may be lower than you would like. You can change the resolution of each group in Blue Iris's local console.</p>
+						<p><img class="img-responsive" mysrc="img/GroupProperties.png" alt="Screenshot of Group Properties" /></p>
+						<p>You may <b>type any resolution</b> you want into the frame size dropdown box.  For best results, use frame dimensions that are multiples of 16.  For convenience, here is a list of suitable multiples of 16 that you can copy from:</p>
+						<div class="panel panel-info">
+							<div class="panel-heading">Multiples of 16</div>
+							<div class="panel-body">
+								16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512, 528, 544, 560, 576, 592, 608, 624, 640, 656, 672, 688, 704, 720, 736, 752, 768, 784, 800, 816, 832, 848, 864, 880, 896, 912, 928, 944, 960, 976, 992, 1008, 1024, 1040, 1056, 1072, 1088, 1104, 1120, 1136, 1152, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280, 1296, 1312, 1328, 1344, 1360, 1376, 1392, 1408, 1424, 1440, 1456, 1472, 1488, 1504, 1520, 1536, 1552, 1568, 1584, 1600, 1616, 1632, 1648, 1664, 1680, 1696, 1712, 1728, 1744, 1760, 1776, 1792, 1808, 1824, 1840, 1856, 1872, 1888, 1904, 1920, 1936, 1952, 1968, 1984, 2000, 2016, 2032, 2048, 2064, 2080, 2096, 2112, 2128, 2144, 2160, 2176, 2192, 2208, 2224, 2240, 2256, 2272, 2288, 2304, 2320, 2336, 2352, 2368, 2384, 2400, 2416, 2432, 2448, 2464, 2480, 2496, 2512, 2528, 2544, 2560, 2576, 2592, 2608, 2624, 2640, 2656, 2672, 2688, 2704, 2720, 2736, 2752, 2768, 2784, 2800, 2816, 2832, 2848, 2864, 2880, 2896, 2912, 2928, 2944, 2960, 2976, 2992, 3008, 3024, 3040, 3056, 3072, 3088, 3104, 3120, 3136, 3152, 3168, 3184, 3200, 3216, 3232, 3248, 3264, 3280, 3296, 3312, 3328, 3344, 3360, 3376, 3392, 3408, 3424, 3440, 3456, 3472, 3488, 3504, 3520, 3536, 3552, 3568, 3584, 3600, 3616, 3632, 3648, 3664, 3680, 3696, 3712, 3728, 3744, 3760, 3776, 3792, 3808, 3824, 3840, 3856, 3872, 3888, 3904, 3920, 3936, 3952, 3968, 3984, 4000
+							</div><!--/.panel-body -->
+						</div><!--/.panel -->
+						<h3>Group Optimization Example</h3>
+						<div style="display: inline-block;">
+							<h4>Before Optimization</h4>
+							<p><img class="img-responsive" mysrc="img/PoorLayout.jpg" alt="Example of poor layout" /></p>
+						</div>
+						<div style="display: inline-block;">
+							<h4>After Optimization</h4>
+							<p><img class="img-responsive" mysrc="img/BetterLayout.jpg" alt="Example of better layout" /></p>
+						</div>
+					</div>
+					<div class="tab-pane" id="recordings" role="tabpanel" aria-labelledby="nav-recordings">
+						<h1>Recordings</h1>
+						<p>To view recorded video, you must use "Clips" tab at the top of the UI.</p>
+						<h2>Alerts</h2>
+						<p>The "Alerts" tab is gone since UI3-120.  "Alerts" is now one of many dropdown list items on the "Clips" tab.  A "Clip" represents a single video file on disk.  An "Alert" is a bookmark to a specific location in a clip.  A single clip may have multiple associated alerts, or no associated alerts.</p>
+						<h2>Filters</h2>
+						<p>You can filter the Clips list by camera, group, date, and database view ("All clips", "Alerts", "New", "Sentry confirmed", etc.).</p>
+						<p>To filter by camera, simply maximize that camera by clicking on it in the main video area.  To filter by other criteria, use the filter controls above the Clip list.</p>
+						<p><img class="img-responsive" mysrc="img/RecordingFilters.png" alt="Screenshot of recording filters" /></p>
+						<h3>Expanding the Filters</h3>
+						<p>If you don't see the filter controls, that means you have collapsed them by clicking on the "Filter Clips by:" text.  Click the "Filter Clips by:" text again to expand the filter controls section.</p>
+						<h3>Context Menu</h3>
+						<p>If you right click (long-press on touchscreens) on an alert or clip, a context menu appears.</p>
+						<div class="row">
+							<div class="col-sm-3">
+								<img class="img-responsive" mysrc="img/ClipContextMenu.png" alt="Screenshot of clip list context menu" />
+							</div>
+							<div class="col-sm-9">
+								<div class="panel panel-info">
+									<div class="panel-heading">Clip list context menu actions</div>
+									<div class="panel-body">
+										<p><span class="label label-primary">Admin</span> privilege is required for some actions.</p>
+										<dl class="dl-vertical">
+											<dt>Flag <span class="label label-primary">Admin</span></dt>
+											<dd>Flags the specified item(s) to make them easier to find later.</dd>
+											<dt>Protect <span class="label label-primary">Admin</span></dt>
+											<dd>Protects the specified item(s) so they will not be deleted by Blue Iris's space-reclaiming algorithm.</dd>
+											<dt>Download </dt>
+											<dd>Downloads the specified clip(s) file exactly as it exists on the server's disk. Only clips can be downloaded.  If you attempt to download an alert, the browser will download the clip which contains the alert.  The format of the downloaded clip is whatever format you have configured for the camera in Blue Iris.</dd>
+											<dt>Delete <span class="label label-primary">Admin</span></dt>
+											<dd>Deletes the specified item(s).</dd>
+											<dt>Enlarge/Shrink Thumbnails</dt>
+											<dd>Toggles between the standard layout and one that dedicates much more space to thumbnail images.</dd>
+											<dt>Enable/Disable Mouseover Thumbs</dt>
+											<dd>Enables or disables a much larger thumbnail that appears when you mouse over each clip.</dd>
+											<dt>Convert/export</dt>
+											<dd>Opens the interface for exporting the selected items as MP4, AVI, or WMV.</dd>
+											<dt>Properties</dt>
+											<dd>Opens a panel containing properties of the selected clip or alert.</dd>
+										</dl>
+									</div><!--/.panel-body -->
+								</div><!--/.panel -->
+							</div>
+						</div>
+						<h3>Multi-Select</h3>
+						<p>If your device has a physical keyboard, you can hold <span class="label label-default">SHIFT</span> and/or <span class="label label-default">CTRL</span> keys while clicking to select multiple items for bulk operations.</p>
+					</div>
+					<div class="tab-pane" id="tips" role="tabpanel" aria-labelledby="nav-tips">
+						<h1>Tips</h1>
+						<ul>
+							<li>Headings in the left toolbar can be clicked to collapse and expand their content.</li>
+							<li>The camera icon in the upper right corner is a quick way to download a snapshot of the current video.</li>
+							<li>
+								Several UI elements have a custom context menu that is accessible by right clicking (long-press on touchscreens).<br />These elements include:
+								<ul>
+									<li>Cameras</li>
+									<li>Alerts and Clips</li>
+									<li>The date filter on Clips tab</li>
+									<li>PTZ Preset buttons</li>
+									<li>Profile and Schedule controls</li>
+									<li>The Stoplight (in the status area at the bottom)</li>
+									<li>The heading that overlays the top of the video player during clip playback</li>
+									<li>The <a href="#hlsstreams">HLS Player</a></li>
+								</ul>
+							</li>
+							<li>The "DISK" status bar in the Status area can be clicked as a shortcut to open the Disk Usage panel.</li>
+						</ul>
+					</div>
+					<div class="tab-pane" id="cameraproperties" role="cameraproperties" aria-labelledby="nav-cameraproperties">
+						<h1>Camera Properties</h1>
+						<p><span class="label label-primary">Admin</span> user permission is required to access this functionality.</p>
+						<p>The Camera Properties panel is accessible from the context menu that appears when you right click on a camera (long-press on touchscreens).  This panel contains some information about the camera and provides a set of common administrative controls, such as the ability to reconfigure the motion sensor.  You can also disable a camera from here.  If you disable a camera, you can re-enable it from the Full Camera List in the <a href="#mainmenu">Main Menu</a>.</p>
+					</div><!--/.tab-pane -->
+					<div class="tab-pane" id="mainmenu" role="tabpanel" aria-labelledby="nav-mainmenu">
+						<h1><img mysrc="img/MainMenuIcon.png" /> Main Menu</h1>
+						<p>To open the Main Menu, click the three dots in the upper right corner of UI3.</p>
+						<div class="panel panel-info">
+							<div class="panel-heading">Main Menu Actions - Items marked with <span class="label label-primary">Admin</span> can only be accessed by Admin users.</div>
+							<div class="panel-body">
+								<dl class="dl-horizontal">
+									<dt>UI Settings</dt>
+									<dd>Opens the UI Settings panel, which contains many settings and hotkeys.  The settings here are not shared with other devices or browsers.</dd>
+									<dt>About This UI</dt>
+									<dd>Opens the About panel, which contains basic information about UI3.  If some features of UI3 are unavailable in your browser, there will be a note of it in the About panel.</dd>
+									<dt>Streaming Profiles</dt>
+									<dd>Opens the Streaming Profiles panel, which allows you to rearrange, add, edit, or delete streaming profiles.</dd>
+									<dt>System Log</dt>
+									<dd><span class="label label-primary">Admin</span> Opens Blue Iris's System Log.</dd>
+									<dt>User List</dt>
+									<dd><span class="label label-primary">Admin</span> Opens a list of all Blue Iris users configured in your system and shows some information about them.</dd>
+									<dt>Device List</dt>
+									<dd><span class="label label-primary">Admin</span> Opens a list of all mobile devices that have connected to your system.</dd>
+									<dt>Full Camera List</dt>
+									<dd>Opens a list of all cameras configured in your system, even those which are not currently enabled.</dd>
+									<dt>Convert/Export List</dt>
+									<dd>Opens the Convert/Export List panel, which allows you to view current export progress and download exported clips.
+									<dt>Disk Usage</dt>
+									<dd>Opens a panel which shows disk usage pie charts.</dd>
+									<dt>Server Control</dt>
+									<dd><span class="label label-primary">Admin</span> Opens a panel containing a few global Blue Iris options you may set, and provides the ability to remotely reboot the computer running Blue Iris.</dd>
+									<dt>Help</dt>
+									<dd>Opens this help file.</dd>
+									<dt>Log Out</dt>
+									<dd>Log out of your current session and open the login page.</dd>
+								</dl>
+							</div>
+						</div>
+					</div><!--/.tab-pane -->
+					<div class="tab-pane" id="export" role="tabpanel" aria-labelledby="nav-export">
+						<h1>Exporting Video</h1>
+						<p>Clips or sections of clips may be exported into MP4, AVI, or WMV formats and then downloaded through UI3.</p>
+						<p>Exported items are kept on your Blue Iris server in the "New" folder as configured in Blue Iris settings, and the files will automatically be managed according to the rules assigned to that folder.  UI3 does not currently offer the ability to delete exported items manually, but you can do this from the Covert/Export queue in Blue Iris's local console.</p>
+						<h3>Begin Exporting</h3>
+						<p>To begin exporting clips, open the Convert/Export interface using one of these methods:</p>
+						<p>
+							<ul>
+								<li>Right-click a clip or alert, then choose <b>Convert/export</b></li>
+								<li>Select multiple clips or alerts, then right-click one of them and choose <b>Convert/export</b></li>
+								<li>Right-click the video player while a recording is open, then choose <b>Convert/export</b></li>
+								<li>Click the Export button <img mysrc="img/ConvertExportIcon.png" alt="icon" style="height: 20px;" /> within the playback controls while a recording is open.</li>
+							</ul>
+						</p>
+						<h3>Configuring an Export Operation</h3>
+						<div class="row">
+							<div class="col-sm-7">
+								<p>When you open the Convert/Export interface, you will be shown a panel with options related to the export operation.</p>
+								<p>MP4 output format is recommended for best compatibility with 3rd-party applications.</p>
+								<p>Encoder profiles used by the export feature cannot be edited in UI3.  This must be done in the local console of Blue Iris.</p>
+								<p>To export a timelapse, disable the audio track and enable re-encoding video to H.264.</p>
+								<p>
+									If you are exporting a single clip, you may choose a specific time range to export. Drag the green and red knobs to your desired start and stop points:<br />
+									<img class="img-responsive" mysrc="img/ExportRange.png" alt="time range screenshot" style="margin: 5px 0px;" />
+								</p>
+							</div>
+							<div class="col-sm-5">
+								<img class="img-responsive" mysrc="img/ConvertExport.png" alt="Convert/export settings" style="margin-bottom: 5px;" />
+							</div>
+						</div>
+						<h3>Export Status</h3>
+						<div class="row">
+							<div class="col-sm-7">
+								<p>
+									When you push "Begin Export", the export jobs are queued and then a small dialog appears to give you status updates.<br />
+								</p>
+								<p>
+									From here, you can:
+									<ul>
+										<li>Open the Convert/Export List (also found in the <a href="#mainmenu">Main Menu</a>)</li>
+										<li>Enable automatic download of finished exports</li>
+										<li>Download finished exports manually</li>
+									</ul>
+								</p>
+							</div>
+							<div class="col-sm-5">
+								<img class="img-responsive" mysrc="img/ExportStatus.png" alt="Export status dialog" style="margin-bottom: 5px;" />
+							</div>
+						</div>
+						<h3>The Convert/Export List</h3>
+						<div class="col-sm-3">
+							<p>This dialog is found in the <a href="#mainmenu">Main Menu</a>, and shows active and recently-finished export jobs.  You may download finished items by clicking on them.</p>
+							<p>
+						</div>
+						<div class="col-sm-9">
+							<img class="img-responsive" mysrc="img/ExportList.png" alt="Convert/Export List" />
+						</div>
+					</div><!--/.tab-pane -->
+					<div class="tab-pane" role="tabpanel" id="template" aria-labelledby="nav-template">
+						<h1>Template</h1>
+						<p></p>
+					</div><!--/.tab-pane -->
+				</div><!--/.tab-content -->
+			</div><!--/.baseContainer -->
+		</div><!--/.row -->
+	</div><!--/.container -->
+	<!-- Bootstrap core JavaScript
+	================================================== -->
+	<!-- Placed at the end of the document so the pages load faster -->
+	<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+	<script type="text/javascript">
+		document.write(
+			(window.jQuery ? '' : '<script src="js/jquery-1.12.4.min.js?v=' + bi_version + local_bi_session_arg + '"><\/script>')
+			+ '<script src="js/bootstrap.min.js?v=' + bi_version + local_bi_session_arg + '"><\/script>'
+			+ '<script src="js/jquery.stickytabs.js?v=' + bi_version + local_bi_session_arg + '"><\/script>'
+			+ '<script src="js/help.js?v=' + bi_version + local_bi_session_arg + '"><\/script>');
+		(function ()
+		{
+			var imgs = document.getElementsByTagName("img");
+			for (var i = 0; i < imgs.length; i++)
+			{
+				var src = imgs[i].getAttribute("mysrc");
+				if (src)
+					imgs[i].src = src + (navigator.cookieEnabled ? "" : "?session=" + local_bi_session);
+			}
+			try
+			{
+				var profileData = JSON.parse(localStorage.ui3_streamingProfileArray);
+				for (var i = 0; i < profileData.length; i++)
+				{
+					var row = $('<tr></tr>');
+					var cell_name = $('<td></td>').text(profileData[i].name);
+					var cell_nameEnc = $('<td></td>').append($('<code></code>').text(encodeURIComponent(profileData[i].name)));
+					row.append(cell_name);
+					row.append(cell_nameEnc);
+					$("#streamingProfileTbody").append(row);
+				}
+				$("#streamingProfileListParagraph").show();
+			}
+			catch (ex)
+			{
+				console.log("Unable to load streaming profiles. Local storage is probably not enabled.");
+				console.error(ex);
+			}
+
+		})();
+	</script>
+</body>
+</html>
