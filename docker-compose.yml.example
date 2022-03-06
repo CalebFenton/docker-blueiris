@@ -1,0 +1,27 @@
+version: '2.4'
+
+services:
+  blueiris:
+    build:
+      context: docker
+      dockerfile: ./Dockerfile
+    restart: unless-stopped
+    hostname: blueiris
+    container_name: blueiris
+    ports:
+      - 1007:8080   # vnc
+      # - 5900:5900
+      - 1006:1006   # blueiris www
+    environment:
+      TZ: America/Chicago
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+    runtime: nvidia
+    volumes:
+      - ./data/wineuser_prefix:/home/wineuser/prefix
+      - ./data/prefix32:/root/prefix32
+      # This is my NAS and I configure blueiris to store stuff there
+      # - nvr-data:/root/prefix32/drive_c/BlueIris/nvr_storage
+    # Only need this the first time you run it
+    privileged: true
+    init: true
