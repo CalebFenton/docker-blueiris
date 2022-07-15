@@ -13,6 +13,9 @@
 	--text-active-color: #FFFFFF;
 	--pctext-color: #E8E8E8;
 	--pctext-hover-color: #FFFFFF;
+	--profile-active-color: #63C35B;
+	--profile-pause-color: #E3D246;
+	--profile-stop-color: #DC164F;
 	--audio-playing-color: #63C35B;
 	--audio-loading-color: #F0F000;
 	--audio-error-color: #F00000;
@@ -295,6 +298,7 @@ body, #layouttop, #layoutleft, #layoutbody, #layoutbottom, .unselectable
 	background-color: var(--panel-bg-color);
 	left: 256px;
 	bottom: 0px;
+	display: block;
 }
 
 .sideBarRight #layoutleft
@@ -315,7 +319,6 @@ body, #layouttop, #layoutleft, #layoutbody, #layoutbottom, .unselectable
 
 .portrait #sidebarPortraitDragbar
 {
-	display: block;
 	position: absolute;
 	top: -15px; /* Coupled: #sidebarPortraitDragbar top and height, #layoutleft margin-top, #statusArea bottom */
 	left: 0px;
@@ -366,7 +369,7 @@ body, #layouttop, #layoutleft, #layoutbody, #layoutbottom, .unselectable
 	width: 196px;
 }
 
-.sizeSmall #layoutleft, .sizeSmall #systemnamewrapper, .sizeSmall .topbar_tab, .sizeSmall .clipExportPanel
+.sizeSmall #layoutleft, .sizeSmall #systemnamewrapper, .sizeSmall .topbar_tab, .sizeSmall .clipExportPanel, .landscape.tabTimeline #layoutleft
 {
 	width: 146px;
 }
@@ -472,6 +475,10 @@ body, #layouttop, #layoutleft, #layoutbody, #layoutbottom, .unselectable
 	font-size: 14px;
 }
 
+#topbar_tab_timeline
+{
+	position: relative;
+}
 
 .topbar_right_floating
 {
@@ -561,6 +568,15 @@ body, #layouttop, #layoutleft, #layoutbody, #layoutbottom, .unselectable
 	width: 18px;
 	height: 18px;
 	padding: 11px 8px;
+}
+
+#open_all_clips_btn.hidden,
+#open_alerts_btn.hidden
+{
+	width: 0px;
+	height: 0px;
+	visibility: hidden;
+	opacity: 0;
 }
 
 div.icon, a.icon
@@ -653,7 +669,7 @@ div.icon, a.icon
 	padding: 0px 18px 10px 19px;
 }
 
-.sizeSmall .leftBarBox, .sizeSmall #statusArea
+.sizeSmall .leftBarBox, .sizeSmall #statusArea, .landscape.tabTimeline #statusArea
 {
 	padding: 0px 7px 5px 8px;
 }
@@ -868,41 +884,65 @@ div.invisibleLabel
 	color: #FFFF00;
 }
 
-.profilebtn.selected
+.profileControls
 {
-	font-weight: bold;
-	background-color: rgba(255,255,255,0.1);
+	display: flex;
 }
 
-#schedule_lock_button.hold
+#schedule_lock_button
 {
-	color: #C03737;
+	flex: 0 0 auto;
+	border: 0px solid transparent;
+	padding: 8px;
+	width: 23px;
+	height: 23px;
+	background-color: transparent;
+	color: var(--profile-active-color);
 }
 
-	#schedule_lock_button.hold:hover
+	#schedule_lock_button:hover
 	{
-		color: #D35555;
+		background-color: rgba(255,255,255,0.1)
 	}
 
-	#schedule_lock_button.hold:active
+	#schedule_lock_button:active
 	{
-		color: #EF9E9E;
+		background-color: rgba(255,255,255,0.2)
 	}
 
-#schedule_lock_button.temp
+	#schedule_lock_button.hold
+	{
+		color: var(--profile-stop-color);
+	}
+
+	#schedule_lock_button.temp
+	{
+		color: var(--profile-pause-color);
+	}
+
+	#schedule_lock_button.disabled
+	{
+		color: #6a6a6a;
+	}
+
+.sizeMedium #schedule_lock_button
 {
-	color: #37C03E;
+	padding: 6px;
+	width: 17px;
+	height: 17px;
 }
 
-	#schedule_lock_button.temp:hover
-	{
-		color: #69D06E;
-	}
+.sizeSmall #schedule_lock_button
+{
+	padding: 3px;
+	width: 13px;
+	height: 13px;
+}
 
-	#schedule_lock_button.temp:active
-	{
-		color: #A5E5A8;
-	}
+#schedule_lock_icon
+{
+	vertical-align: top;
+}
 
 .collapsibleTriggerIcon
 {
@@ -959,7 +999,8 @@ div.invisibleLabel
 .fiveByTwoButtonSet,
 .dropdownBox,
 .standardLeftBarBoxSize,
-.leftBarBool
+.leftBarBool,
+.profileControls
 {
 	width: 190px;
 }
@@ -968,7 +1009,8 @@ div.invisibleLabel
 .sizeMedium .fiveByTwoButtonSet,
 .sizeMedium .dropdownBox,
 .sizeMedium .standardLeftBarBoxSize,
-.sizeMedium .leftBarBool
+.sizeMedium .leftBarBool,
+.sizeMedium .profileControls
 {
 	width: 155px;
 }
@@ -977,7 +1019,8 @@ div.invisibleLabel
 .sizeSmall .fiveByTwoButtonSet,
 .sizeSmall .dropdownBox,
 .sizeSmall .standardLeftBarBoxSize,
-.sizeSmall .leftBarBool
+.sizeSmall .leftBarBool,
+.sizeSmall .profileControls
 {
 	width: 125px;
 }
@@ -1216,6 +1259,49 @@ div.invisibleLabel
 	max-width: 100%;
 	max-height: 20px;
 }
+/* Relative PTZ / 3D Positioning */
+#ptzRelativeToggleSection
+{
+	text-align: center;
+}
+
+#ptzRelativeToggle
+{
+	font-size: 16px;
+}
+
+.sizeMedium #ptzRelativeToggle
+{
+	font-size: 14px;
+}
+
+.sizeSmall #ptzRelativeToggle
+{
+	font-size: 11px;
+}
+
+#relativeptzbox
+{
+	border: 3px solid Red;
+	display: none;
+	background-color: transparent;
+	position: absolute;
+	z-index: 2;
+	opacity: 1;
+	overflow: visible;
+	pointer-events: none;
+}
+
+.relativePtzDebugText
+{
+	position: absolute;
+	z-index: 1;
+	font-size: 16px;
+	background-color: #000000;
+	color: var(--text-active-color);
+	padding: 3px;
+}
+
 /* Progress Bars */
 .progressBarOuter
 {
@@ -1233,16 +1319,22 @@ div.invisibleLabel
 	height: 12px;
 }
 
-.sizeSmall .progressBarOuter
+.sizeSmall .progressBarOuter,
+.landscape.tabTimeline .progressBarOuter
 {
 	width: 70px;
 	height: 8px;
 }
 
+.landscape.tabTimeline .progressBarOuter
+{
+	height: 12px;
+}
+
 .statusTiny .progressBarOuter
 {
-	width: 100%;
-	height: 2px;
+	width: 100% !important;
+	height: 2px !important;
 }
 
 .progressBarInner
@@ -1351,7 +1443,8 @@ div.invisibleLabel
 	padding-bottom: 3px;
 }
 
-.sizeSmall #statusArea
+.sizeSmall #statusArea,
+.landscape.tabTimeline #statusArea
 {
 	padding-bottom: 4px;
 }
@@ -1384,11 +1477,17 @@ div.invisibleLabel
 	line-height: 14px;
 }
 
-.sizeSmall .serverStatusLabel
+.sizeSmall .serverStatusLabel,
+.landscape.tabTimeline .serverStatusLabel
 {
 	margin-bottom: 1px;
 	font-size: 12px;
 	line-height: 12px;
+}
+
+.landscape.tabTimeline .serverStatusLabel
+{
+	margin-bottom: 5px;
 }
 
 .serverStatusSmallIcon
@@ -1410,7 +1509,8 @@ div.invisibleLabel
 	width: 18px;
 }
 
-.sizeSmall .serverStatusSmallIcon
+.sizeSmall .serverStatusSmallIcon,
+.landscape.tabTimeline .serverStatusSmallIcon
 {
 	padding-left: 3px;
 	padding-top: 0px;
@@ -1418,6 +1518,11 @@ div.invisibleLabel
 	height: 9px;
 	position: relative;
 	top: -1px;
+}
+
+.landscape.tabTimeline .serverStatusSmallIcon
+{
+	padding-top: 1px;
 }
 
 .serverStatusLabel.collapsed .serverStatusSmallIcon
@@ -1445,7 +1550,8 @@ div.invisibleLabel
 	height: 14px;
 }
 
-.sizeSmall #stoplightBtn div
+.sizeSmall #stoplightBtn div,
+.landscape.tabTimeline #stoplightBtn div
 {
 	width: 13px;
 	height: 13px;
@@ -1489,19 +1595,26 @@ div.invisibleLabel
 	line-height: 12px;
 }
 
-.sizeSmall .statusBar
+.sizeSmall .statusBar,
+.landscape.tabTimeline .statusBar
 {
 	padding-bottom: 2px;
 	font-size: 10px;
 	line-height: 8px;
 }
 
+.landscape.tabTimeline .statusBar
+{
+	padding-bottom: 4px;
+	line-height: 12px;
+}
+
 .statusBar.statusTiny
 {
-	padding-bottom: 0px;
-	font-size: 0px;
-	line-height: 0px;
-	height: 3px;
+	padding-bottom: 0px !important;
+	font-size: 0px !important;
+	line-height: 0px !important;
+	height: 3px !important;
 }
 
 @media (min-width: 320px)
@@ -1569,7 +1682,8 @@ div.invisibleLabel
 	width: 45px;
 }
 
-.sizeSmall .statusBarLabel
+.sizeSmall .statusBarLabel,
+.landscape.tabTimeline .statusBarLabel
 {
 	width: 35px;
 }
@@ -1761,6 +1875,7 @@ div.invisibleLabel
 	cursor: pointer;
 	overflow: hidden;
 	background-color: var(--uicontrol-bg-color);
+	display: flex;
 }
 
 	.dropdownBox.disabled
@@ -1818,23 +1933,26 @@ div.invisibleLabel
 	margin-top: 3px;
 }
 
+.dropdownBox[name="profile"]
+{
+	margin-top: 0px;
+}
+
 .dropdownLabel
 {
-	display: inline-block;
+	flex: 1 1 auto;
 	font-size: 16px;
 	padding-top: 10px;
 	color: var(--text-color);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	max-width: 150px;
 }
 
 .sizeMedium .dropdownLabel
 {
 	font-size: 15px;
 	padding-top: 5px;
-	max-width: 125px;
 }
 
 .sizeSmall .dropdownLabel
@@ -1842,7 +1960,6 @@ div.invisibleLabel
 	font-size: 13px;
 	line-height: 19px;
 	padding-top: 0px;
-	max-width: 107px;
 }
 
 .dropdownBox:hover .dropdownLabel
@@ -2042,6 +2159,16 @@ div.invisibleLabel
 {
 	margin-right: 4px;
 	padding-top: 2px;
+}
+
+.orangeIcon
+{
+	color: #FF5F00;
+}
+
+.greenIcon
+{
+	color: #64C35C;
 }
 
 /* Left Bar Checkboxes */
@@ -2900,18 +3027,26 @@ div.invisibleLabel
 
 .clipTimeline
 {
+	position: relative;
+	width: 100%;
+	height: 100%;
 }
 
 .timelineLegendBar
 {
 	height: 16px;
-	width: 100%;
 	background-color: var(--datetile-bg-color);
+	position: relative;
 }
 
 .timelineLegend
 {
 	position: absolute;
+	top: 0px;
+	left: 0px;
+	width: 100%;
+	height: 100%;
+	overflow: hidden;
 }
 
 .timelineLabel
@@ -2965,79 +3100,39 @@ div.invisibleLabel
 
 .timelineMain
 {
-	width: 100%;
 	height: 80px;
 	background-color: var(--timeline-background-color);
 	position: relative;
 	z-index: 1;
+	overflow: hidden;
 }
 
-.timelineLoader
-{
-	height: 100%;
-	width: 100%;
-	position: absolute;
-	animation: fadeInOpacity .8s;
-}
-
-.timelineLoaderTag
+.timelineButtonBar
 {
 	position: absolute;
 	top: 0px;
 	height: 100%;
+	right: 0px;
+	width: 36px;
 	box-sizing: border-box;
-	border: 1px solid rgba(255,255,255,0.7);
-	border-radius: 10px;
-	background-color: rgba(255,255,255,0.15);
-	display: flex;
-	justify-content: center;
-	align-items: stretch;
-	opacity: 1;
+	border-top: 1px solid #383E47;
+	border-left: 1px solid #383E47;
+	padding-top: 1px;
+	background-color: var(--panel-bg-color);
+	cursor: default;
 }
 
-.timelineLoaderTagLoading
+.timelineButton
 {
-	background-color: rgba(0,255,0,0.15);
+	width: 22px;
+	height: 22px;
+	padding: 4px 7px 5px 6px;
 }
 
-.timelineLoaderWaiting
+.timelineGoLive svg
 {
-	margin: 20px;
-}
-
-@keyframes fadeInOpacity
-{
-	0%
-	{
-		opacity: 0;
-	}
-
-	50%
-	{
-		opacity: 0;
-	}
-
-	100%
-	{
-		opacity: 1;
-	}
-}
-
-.timelineLoaderDayError
-{
-	background-color: rgba(255,104,52,0.2);
-}
-
-.timelineLoaderError
-{
-	margin: 10px 2px;
-	color: rgba(255,52,52,0.5);
-}
-
-.clipTimelineCanvas
-{
-	width: 100%;
-	height: 100%;
+	transform: rotate(329deg);
+	transform-origin: center;
 }
 
 .timelineCenterBar
@@ -3047,7 +3142,7 @@ div.invisibleLabel
 	height: 100%;
 	width: 2px;
 	background-color: rgba(0,213,255,0.75);
-	z-index: 1;
+	z-index: 2;
 }
 
 .timelineError
@@ -3097,11 +3192,6 @@ div.invisibleLabel
 	display: none;
 }
 
-#camimg
-{
-	display: none;
-}
-
 .videoCanvas,
 #videoElement_wrapper,
 #videoElement_wrapper video
@@ -3137,6 +3227,7 @@ body + div
 	opacity: 1;
 	margin: 0px 5px 5px 0px;
 	font-size: 16px;
+	pointer-events: none;
 }
 
 .inputRequiredToPlay
@@ -3458,6 +3549,7 @@ body + div
 
 .playbackSettingsLine
 {
+	display: block;
 	cursor: pointer;
 	padding: 10px;
 }
@@ -3527,6 +3619,17 @@ body + div
 	line-height: 18.4px;
 	margin-left: 10px;
 }
+
+	.playbackSettingsFloatRight .dialogOption_item_btn
+	{
+		padding: 0px;
+		margin: -3px 0px 0px 10px;
+	}
+
+		.playbackSettingsFloatRight .dialogOption_item_btn input[type="button"]
+		{
+			margin: 0px;
+		}
 
 .playbackSettingsRightArrow
 {
@@ -3747,9 +3850,42 @@ body + div
 
 	.prioritizeTriggeredButton.on
 	{
-		color: var(--seek-bar-color);
+		animation: prioritizeTriggeredButton 2s infinite;
+		animation-timing-function: steps(4, end);
 	}
 
+@keyframes prioritizeTriggeredButton
+{
+	0%
+	{
+		color: #FFFFFF;
+	}
+
+	50%
+	{
+		color: var(--context-menu-icon-highlight-color);
+	}
+
+	100%
+	{
+		color: #FFFFFF;
+	}
+}
+
+.showOnTimeline
+{
+	display: none;
+}
+
+.tabTimeline .showOnTimeline
+{
+	display: initial;
+}
+
+.tabTimeline .hideOnTimeline
+{
+	display: none;
+}
 /* Seek Bar */
 #seekBarWrapper
 {
@@ -4183,6 +4319,16 @@ body + div
 	border: 0px solid transparent;
 }
 
+	.simpleTextButton:hover
+	{
+		box-shadow: 0px 0px 1px 2px rgba(255,255,255,0.5);
+	}
+
+	.simpleTextButton.disabled:hover
+	{
+		box-shadow: none;
+	}
+
 .btnBlue
 {
 	background-color: #B9B9B9;
@@ -4297,6 +4443,19 @@ body + div
 		background-color: rgba(255,255,255,0.1);
 	}
 
+	.btnTransparent.turnedon
+	{
+		background-color: var(--profile-active-color);
+		color: #000000;
+	}
+
+.simpleTextButton.disabled
+{
+	background-color: transparent;
+	color: #3e4149;
+	border-color: #3e4149;
+	cursor: not-allowed;
+}
 /* Three-state buttons */
 .triBtn0,
 .triBtn1,
@@ -4818,6 +4977,17 @@ body + div
 	color: #666666;
 }
 
+.dialogOption_item.column_reverse
+{
+	display: flex;
+	flex-direction: column-reverse;
+}
+
+	.dialogOption_item.column_reverse .textBasedInput
+	{
+		max-width: unset;
+	}
+
 .dialogOption_label
 {
 	font-size: 16px;
@@ -4839,8 +5009,7 @@ body + div
 
 .dialogOptionPanel select,
 .dialogOptionPanel input[type="number"],
-.dialogOptionPanel input[type="color"],
-.dialogOptionPanel input[type="text"],
+.dialogOptionPanel .textBasedInput,
 #uiSettingsPanel input[type="button"],
 #uiSettingsPanel a.input,
 #sysconfigdialog input[type="button"]
@@ -4850,6 +5019,45 @@ body + div
 	margin: 0px 10px;
 	float: right;
 	max-width: 35%;
+}
+
+	.dialogOptionPanel .textBasedInput input[type="text"],
+	.dialogOptionPanel .textBasedInput input[type="color"],
+	.dialogOptionPanel .textBasedInput input[type="password"]
+	{
+		box-sizing: border-box;
+		height: 28px;
+		width: 100% !important;
+	}
+
+a[role="button"].showPasswordButton
+{
+	position: relative;
+	margin-left: -27px;
+	top: -1px;
+	text-decoration: none;
+	width: 26px;
+	height: 26px;
+	line-height: 26px;
+	display: inline-block;
+	text-align: center;
+	opacity: 0.5;
+}
+
+	a[role="button"].showPasswordButton.showingPassword
+	{
+		opacity: 1;
+		background-color: rgba(255,255,0,0.5);
+	}
+
+	a[role="button"].showPasswordButton:hover
+	{
+		background-color: rgba(0,0,0,0.1);
+	}
+
+.passwordInput
+{
+	padding-right: 29px;
 }
 
 .clipExportPanel select
@@ -5162,7 +5370,7 @@ div::-webkit-scrollbar-corner
 		color: #FFFFFF;
 	}
 
-	.clipExportPanel .panel_close::active
+	.clipExportPanel .panel_close:active
 	{
 		background-color: #F1707A;
 		color: #FFFFFF;
@@ -5563,7 +5771,14 @@ div::-webkit-scrollbar-corner
 	width: 169px;
 }
 
-#uiSettingsPanel input[type="range"]
+#uiSettingsPanel input[type="password"],
+.streamingProfileEditorPanel input[type="password"]
+{
+	width: 169px;
+}
+
+#uiSettingsPanel input[type="range"],
+.dialogOptionPanel input[type="range"]
 {
 	width: 90%;
 	margin: 0px 5%;
@@ -5581,7 +5796,7 @@ div::-webkit-scrollbar-corner
 		background-color: rgba(255,255,255,0.05);
 	}
 
-/*#uiSettingsPanel input[type="button"]
+	/*#uiSettingsPanel input[type="button"]
 {
 	background-color: #C03737;
 	color: #FFFFFF;
@@ -5590,6 +5805,38 @@ div::-webkit-scrollbar-corner
 	padding-right: 12px;
 	cursor: pointer;
 }*/
+
+	.uiSettingsRow.withDefaultBtn
+	{
+		display: flex;
+		align-items: center;
+	}
+
+		.uiSettingsRow.withDefaultBtn > *
+		{
+			width: 100%;
+			flex: 1 1 auto;
+		}
+
+		.uiSettingsRow.withDefaultBtn > .uiFormFieldDefaultBtn
+		{
+			flex: 0 0 auto;
+			padding: 10px 4px 10px 2px;
+			width: 20px;
+			height: 20px;
+			cursor: pointer;
+			color: var(--text-color);
+		}
+
+			.uiSettingsRow.withDefaultBtn > .uiFormFieldDefaultBtn:hover
+			{
+				color: var(--text-hover-color);
+			}
+
+			.uiSettingsRow.withDefaultBtn > .uiFormFieldDefaultBtn:active
+			{
+				color: var(--text-active-color);
+			}
 
 #volumeBar.audioTemporarilyUnavailable,
 #volumeBar.audioNoPermission,
@@ -5602,7 +5849,7 @@ div::-webkit-scrollbar-corner
 	display: none !important;
 }
 
-.nonMatchingNativeRes, .dprTag
+.nonMatchingNativeRes, .dprTag, .requestedRes
 {
 	color: #e6e660;
 }

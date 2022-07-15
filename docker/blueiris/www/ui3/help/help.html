@@ -17,6 +17,7 @@
 			border: 1px solid black;
 			padding: 1px 2px;
 		}
+
 		.urlParameterAlias
 		{
 			margin-left: 10px;
@@ -52,8 +53,8 @@
 					<ul class="nav navbar-nav nav-pills">
 						<li class="active"><a data-toggle="pill" href="#overview" id="nav-overview">Overview</a></li>
 						<li><a data-toggle="pill" href="#cameralayout" id="nav-cameralayout">Camera Layout</a></li>
-						<li><a data-toggle="pill" href="#recordings" id="nav-recordings">Recordings</a></li>
 						<li><a data-toggle="pill" href="#videoplayer" id="nav-videoplayer">Video Player</a></li>
+						<li><a data-toggle="pill" href="#urlparameters" id="nav-urlparameters">URL Parameters</a></li>
 						<li class="dropdown">
 							<a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">More Topics<span class="caret"></span></a>
 							<ul class="dropdown-menu">
@@ -61,10 +62,12 @@
 								<li><a data-toggle="pill" href="#export" id="nav-export">Exporting Video</a></li>
 								<li><a data-toggle="pill" href="#hlsstreams" id="nav-hlsstreams">HLS Streams</a></li>
 								<li><a data-toggle="pill" href="#mainmenu" id="nav-mainmenu">Main Menu</a></li>
+								<li><a data-toggle="pill" href="#mqtt" id="nav-mqtt">MQTT Remote Control</a></li>
+								<li><a data-toggle="pill" href="#ptzcontrols" id="nav-ptzcontrols">PTZ Controls</a></li>
+								<li><a data-toggle="pill" href="#recordings" id="nav-recordings">Recordings</a></li>
 								<li><a data-toggle="pill" href="#nerdstats" id="nav-nerdstats">Stats for Nerds</a></li>
 								<li><a data-toggle="pill" href="#tips" id="nav-tips">Tips</a></li>
 								<li><a data-toggle="pill" href="#extensions" id="nav-extensions">UI Extensions</a></li>
-								<li><a data-toggle="pill" href="#urlparameters" id="nav-urlparameters">URL Parameters</a></li>
 								<!--li role="separator" class="divider"></li>
 								<li class="dropdown-header">Nav header</li>
 								<li><a href="#">Separated link</a></li>
@@ -83,7 +86,9 @@
 				<div class="tab-content">
 					<div class="tab-pane active" id="overview" role="tabpanel" aria-labelledby="nav-overview">
 						<h2>UI3 Help Overview</h2>
-						<p>Please choose a section from the navigation menu above.</p>
+						<p>Please choose a section:</p>
+						<div id="overviewIndex" class="list-group">
+						</div>
 						<h2>Support</h2>
 						<p>If you need support with UI3, the best place to go for help is <a href="https://ipcamtalk.com/forums/blue-iris.30/">the Blue Iris section of the IpCamTalk forum</a>.</p>
 						<p>This interface was developed by community member <a target="_blank" href="https://ipcamtalk.com/members/bp2008.28/">bp2008</a> from <a href="https://ipcamtalk.com/">IpCamTalk</a>.</p>
@@ -197,6 +202,30 @@
 						<p>One of the pages included with UI3 is "livestream.htm" which just plays an HLS stream from Blue Iris and does basically nothing else.  The page takes a single URL parameter "cam" with the short name of the camera or group you wish to view.  Example: <a href="../../livestream.htm?cam=index">livestream.htm?cam=index</a></p>
 						<p class="bg-info padded-info">If you omit the "cam" parameter, livestream.htm will attempt to load "index" (a.k.a. "all cameras" ).</p>
 					</div>
+					<div class="tab-pane" id="ptzcontrols" role="tabpanel" aria-labelledby="nav-ptzcontrols">
+						<h1>PTZ Controls</h1>
+						<p>UI3 offers several methods of controlling Pan-Tilt-Zoom (PTZ) cameras.  For correct behavior, each camera must have the appropriate PTZ control profile chosen in Blue Iris.  Not all cameras support all functions that are shown in the user interface.</p>
+						<h3>Standard PTZ Controls</h3>
+						<p>The primary method of PTZ input is via the PTZ button pad on the Live View tab, where buttons are available to pan, tilt, zoom, or adjust camera focus.  Mouse over each button for a description of what each button does.  The button at the center of the button pad is to "Stop" the camera, which is unnecessary in most cases but may be helpful if your camera is stuck in a moving state and the other buttons cannot stop it.</p>
+						<h3>Preset Positions</h3>
+						<p>Below the PTZ button pad, there are buttons for loading and setting PTZ presets.</p>
+						<h4>Goto Preset</h4>
+						<p>Click a button to instruct the camera to go to that preset position.</p>
+						<h4>Set Preset</h4>
+						<p>Long-press (click and hold) a button to set the preset to the camera's current position.  You will be prompted to enter a name for the preset, and given the option to cancel the "Set" operation.  If you proceed, the camera will be instructed to save the preset, and Blue Iris save a snapshot of the current view to show within the preset button.</p>
+						<p>If long-press doesn't work, you can access the "Set" functionality by right clicking each preset button to open a context menu.</p>
+						<h4>Mouseover</h4>
+						<p>Mousing over any preset button will show the name assigned to the preset, along with the saved snapshot.</p>
+						<h3>3D Positioning</h3>
+						<p>On supported cameras, the "Toggle 3D Positioning" button can be used to enable 3D Positioning mode, where you can click a spot in the camera's field of view and the camera will attempt to center its view on that position.</p>
+						<p>If you click and drag, you can draw a rectangle around the region you would like the camera to move to.  Drag <b>left-to-right</b> to draw a red rectangle that will cause the camera to <b>zoom in</b>.  Drag <b>right-to-left</b> to draw a blue rectangle that will cause the camera to <b>zoom out</b>.</p>
+						<p>For devices with a keyboard, you can hold the CTRL key to temporarily enable "3D Positioning" mode, even when not on the Live View tab.  <i>(TIP: the CTRL key + click method is also supported in Blue Iris's local console for basic 3D positioning.)</i></p>
+						<p>For devices with a mouse wheel, you can click with the mouse wheel instead of the primary mouse button to directly access "3D Positioning" mode without explicitly enabling it and without using the CTRL key.</p>
+						<p><i>* At this time, UI3 does not support 3D Positioning while viewing a camera group, only when viewing an individual camera.</i></p>
+						<p class="bg-info padded-info"><b>3D Positioning Compatibility</b><br /><br />If you know that your camera supports 3D positioning in its web interface, but you can't make it work in Blue Iris or in UI3, try selecting a different PTZ control profile for the camera in Blue Iris.  Blue Iris has multiple choices of PTZ protocol for some popular camera manufacturers, such as Dahua.<br /><br />As of Blue Iris 5.5.6.18, 3D positioning with zoom capability is supported with the "Dahua New V4" PTZ profile.  Other PTZ profiles may offer limited or no support for 3D positioning.<br /><br />3D Positioning support may change with Blue Iris updates and with camera firmware updates.<br /><br />If none of the relevant PTZ profiles enable 3D Positioning with your camera, but you know your camera is capable of 3D positioning, Blue Iris Support may be able to help (requires an active support plan).</p>
+						<h3>Hotkeys</h3>
+						<p>Hotkeys exist for most PTZ functions, and hotkeys work even if you are not on the Live View tab.  With a default hotkey configuration, try the arrow keys to pan and tilt, <code>+</code> and <code>-</code> keys on the number bar to zoom, and <code>[</code> and <code>]</code> keys to adjust focus.  The number keys 0-9 on the number bar are bound to goto PTZ presets.  Holding the CTRL key will temporarily activate "3D Positioning" mode (see "3D Positioning" section above).</p>
+					</div>
 					<div class="tab-pane" id="nerdstats" role="tabpanel" aria-labelledby="nav-nerdstats">
 						<h1>Stats for Nerds</h1>
 						<p>Inspired by YouTube's feature with the same name, UI3 has a "Stats for nerds" panel which shows an assortment of details about the video player.  This information can be useful for troubleshooting, but otherwise it is just fun to look at.</p>
@@ -258,6 +287,11 @@
 							</thead>
 							<tbody>
 								<tr>
+									<td>timeout=[minutes]<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">to=</span></td>
+									<td>Replace [minutes] with the desired integer number of minutes to set the Idle Timeout setting upon UI startup.  Useful for systems that cannot save persistent settings.</td>
+									<td><a href="../../ui3.htm?timeout=0" target="_blank">ui3.htm?timeout=0</a></td>
+								</tr>
+								<tr>
 									<td>maximize=1<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">m=</span></td>
 									<td>UI3 loads with the left and top control bars hidden. This state persists between UI loads.</td>
 									<td><a href="../../ui3.htm?maximize=1" target="_blank">ui3.htm?maximize=1</a></td>
@@ -268,6 +302,9 @@
 									<td><a href="../../ui3.htm?maximize=0" target="_blank">ui3.htm?maximize=0</a></td>
 								</tr>
 								<tr>
+									<td colspan="3"><i>Note that UI3 cannot automatically full-screen itself due to security protections imposed by web browsers.<br />Please do a web search for how to open your favorite browser in full-screen or kiosk mode.</i></td>
+								</tr>
+								<tr>
 									<td>tab=live<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">t=L</span></td>
 									<td>The "Live" tab is loaded.</td>
 									<td><a href="../../ui3.htm?tab=live" target="_blank">ui3.htm?tab=live</a></td>
@@ -276,6 +313,11 @@
 									<td>tab=clips<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">t=C</span></td>
 									<td>The "Clips" tab is loaded.</td>
 									<td><a href="../../ui3.htm?tab=clips" target="_blank">ui3.htm?tab=clips</a></td>
+								</tr>
+								<tr>
+									<td>tab=timeline<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">t=T</span></td>
+									<td>The "Timeline" tab is loaded.</td>
+									<td><a href="../../ui3.htm?tab=timeline" target="_blank">ui3.htm?tab=timeline</a></td>
 								</tr>
 								<tr>
 									<td>clipview=X<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">v=</span></td>
@@ -340,6 +382,18 @@
 									<td><a href="../../ui3.htm?rec=21148130039-10000" target="_blank">ui3.htm?rec=21148130039-10000</a></td>
 								</tr>
 								<tr>
+									<td>timeline=MS<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">tl=</span></td>
+									<td>
+										<p>
+											Opens the timeline tab and seeks to the specified millisecond position. The "MS" value should be a JavaScript timestamp (number of milliseconds since the unix epoch, ignoring leap seconds).
+										</p>
+										<p style="font-style: italic;">
+											To make it easy to share links, this parameter is automatically entered into the address bar during timeline playback.
+										</p>
+									</td>
+									<td><a href="../../ui3.htm?timeline=" target="_blank" id="timelineLink">ui3.htm?timeline=</a></td>
+								</tr>
+								<tr>
 									<td>streamingprofile=name<br /><span class="urlParameterAlias" title="This shorter alternative can be used instead">p=</span></td>
 									<td>
 										<p>
@@ -386,26 +440,17 @@
 					</div>
 					<div class="tab-pane" id="cameralayout" role="tabpanel" aria-labelledby="nav-cameralayout">
 						<h1>Camera Layout</h1>
-						<p>UI3 is unable to control your camera layout.  To change the camera layout, you must drag cameras around in Blue Iris's local console.</p>
+						<p>UI3 is unable to directly control the order or exact positioning of your cameras.  To change the order of your cameras, you must enter "Edit Layout" mode in Blue Iris's local console, and drag cameras around.</p>
 						<h2>Optimizing Group Frames</h2>
-						<p>The default group frame size may have a lot of empty black area, or the resolution may be lower than you would like. You can change the resolution of each group in Blue Iris's local console.</p>
-						<p><img class="img-responsive" mysrc="img/GroupProperties.png" alt="Screenshot of Group Properties" /></p>
-						<p>You may <b>type any resolution</b> you want into the frame size dropdown box.  For best results, use frame dimensions that are multiples of 16.  For convenience, here is a list of suitable multiples of 16 that you can copy from:</p>
-						<div class="panel panel-info">
-							<div class="panel-heading">Multiples of 16</div>
-							<div class="panel-body">
-								16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512, 528, 544, 560, 576, 592, 608, 624, 640, 656, 672, 688, 704, 720, 736, 752, 768, 784, 800, 816, 832, 848, 864, 880, 896, 912, 928, 944, 960, 976, 992, 1008, 1024, 1040, 1056, 1072, 1088, 1104, 1120, 1136, 1152, 1168, 1184, 1200, 1216, 1232, 1248, 1264, 1280, 1296, 1312, 1328, 1344, 1360, 1376, 1392, 1408, 1424, 1440, 1456, 1472, 1488, 1504, 1520, 1536, 1552, 1568, 1584, 1600, 1616, 1632, 1648, 1664, 1680, 1696, 1712, 1728, 1744, 1760, 1776, 1792, 1808, 1824, 1840, 1856, 1872, 1888, 1904, 1920, 1936, 1952, 1968, 1984, 2000, 2016, 2032, 2048, 2064, 2080, 2096, 2112, 2128, 2144, 2160, 2176, 2192, 2208, 2224, 2240, 2256, 2272, 2288, 2304, 2320, 2336, 2352, 2368, 2384, 2400, 2416, 2432, 2448, 2464, 2480, 2496, 2512, 2528, 2544, 2560, 2576, 2592, 2608, 2624, 2640, 2656, 2672, 2688, 2704, 2720, 2736, 2752, 2768, 2784, 2800, 2816, 2832, 2848, 2864, 2880, 2896, 2912, 2928, 2944, 2960, 2976, 2992, 3008, 3024, 3040, 3056, 3072, 3088, 3104, 3120, 3136, 3152, 3168, 3184, 3200, 3216, 3232, 3248, 3264, 3280, 3296, 3312, 3328, 3344, 3360, 3376, 3392, 3408, 3424, 3440, 3456, 3472, 3488, 3504, 3520, 3536, 3552, 3568, 3584, 3600, 3616, 3632, 3648, 3664, 3680, 3696, 3712, 3728, 3744, 3760, 3776, 3792, 3808, 3824, 3840, 3856, 3872, 3888, 3904, 3920, 3936, 3952, 3968, 3984, 4000
-							</div><!--/.panel-body -->
-						</div><!--/.panel -->
-						<h3>Group Optimization Example</h3>
-						<div style="display: inline-block;">
-							<h4>Before Optimization</h4>
-							<p><img class="img-responsive" mysrc="img/PoorLayout.jpg" alt="Example of poor layout" /></p>
-						</div>
-						<div style="display: inline-block;">
-							<h4>After Optimization</h4>
-							<p><img class="img-responsive" mysrc="img/BetterLayout.jpg" alt="Example of better layout" /></p>
-						</div>
+						<p>Since Blue Iris 5.5, group video streams have a dynamic resolution intended to best-fit within the viewport you have available.  If you wish to adjust this behavior, there are a few ways to do it:</p>
+						<h3>In UI3</h3>
+						<p>
+							Right-click the group video in UI3, and choose "Group Settings".  Here, you can force a specific aspect ratio for the group frame, adjust the streaming resolution limit to improve quality or save CPU cycles, or toggle features like the camera labels and borders.  Control of the group frame's aspect ratio will be unavailable if you have configured a fixed aspect ratio for the group within Blue Iris's local console.
+						</p>
+						<h3>In the Blue Iris Local Console</h3>
+						<p>
+							In the local console, choose the desired group and click the "Edit Layout" button to the right of the group selection dropdown list.  Then, right click any camera to access a menu of options to configure the group layout.  Most options here also affect UI3.  You can also click and drag cameras to reposition them.
+						</p>
 					</div>
 					<div class="tab-pane" id="recordings" role="tabpanel" aria-labelledby="nav-recordings">
 						<h1>Recordings</h1>
@@ -515,6 +560,50 @@
 							</div>
 						</div>
 					</div><!--/.tab-pane -->
+					<div class="tab-pane" id="mqtt" role="tabpanel" aria-labelledby="nav-mqtt">
+						<h1>MQTT Remote Control</h1>
+						<p>Since UI3-216, MQTT can be configured as a communication channel to remotely control UI3 instances.  MQTT is a lightweight publish/subscribe messaging system commonly used in home automation.</p>
+						<h3>Prerequisite</h3>
+						<p>To use MQTT in UI3, you must first have access to an MQTT broker with WebSocket support, such as <a href="https://mosquitto.org/">Eclipse Mosquitto&#8482;</a> software.  Mosquitto is commonly installed as an addon to the popular Home Assistant OS running on a raspberry pi or a virtual machine or docker container, but the Mosquitto server can also be installed on Windows if desired.  Installing and configuring an MQTT broker is outside the scope of this document.</p>
+						<h3>UI3 Configuration</h3>
+						<p>Go to UI3's Main Menu > UI Settings > MQTT Remote Control section and fill in the WebSocket URL, User Name, and Password fields.  Adjust the Instance ID if you desire (it is randomly generated, but can be edited).  For basic users, the  MQTT Advanced options should be left at their default values.  When ready, enable the MQTT Client via the toggle button labelled "Enable MQTT Client".  Toast messages should quickly appear indicating success or failure of the connection to the MQTT broker.</p>
+						<p class="bg-info padded-info"><b>What are WebSocket URLs?</b><br /><br />WebSocket URLs are very similar to regular web URLs, except instead of beginning with <code>http://</code> or <code>https://</code>, they begin with <code>ws://</code> for unencrypted connections, or <code>wss://</code> for connections that will be secured with TLS.<br /><br />An example WebSocket URL is <code>ws://homeassistant.local:1884/</code> which indicates that the connection should use an unencrypted connection to the host named <code>homeassistant.local</code> on TCP port <code>1884</code>.</p>
+						<h3>Remote Functions</h3>
+						<p>You can use UI3's MQTT Remote Control capabilities to change the current live group or camera, maximize or unmaximize the video player, and change the volume of audio streaming.</p>
+						<div class="panel panel-info">
+							<div class="panel-heading">List of MQTT topics used by UI3</div>
+							<div class="panel-body">
+								<dl class="dl-vertical">
+									<dt>ui3/instance_id/state/vid</dt>
+									<dd>The group name or camera short name currently being live-viewed.</dd>
+									<dt>ui3/instance_id/state/maximize</dt>
+									<dd><code>0</code> or <code>1</code> to indicate whether the UI is maximized.</dd>
+									<dt>ui3/instance_id/state/volume</dt>
+									<dd> Audio playback volume from <code>0</code> to <code>100</code> (for the video player's volume control).</dd>
+								</dl>
+							</div><!--/.panel-body -->
+						</div><!--/.panel -->
+						<p>Note the <code>instance_id</code> text in the MQTT topic list above.  <code>instance_id</code> is placeholder text which must be replaced by the Instance ID as configured in UI Settings.  It is this Instance ID which enables you to individually target specific UI3 instances when multiple UI3 instances are connected to the same MQTT broker.  The Instance ID is randomly generated by each web browser you run UI3 in, but it can be modified manually if desired.  It is saved in the browser's Local Storage along with all other UI settings.</p>
+						<p>UI3 subscribes to these topics with its own Instance ID, and reacts when other MQTT clients publish messages to them.</p>
+						<p>UI3 also publishes messages to these topics when the local state changes due to user-interaction, so that other MQTT clients can subscribe to them to learn the current state of the UI3 instance.  This behavior coincidentally allows a UI3 instance to remotely control another UI3 instance if they are both connected to the same MQTT broker, and both have the same Instance ID assigned.</p>
+						<h3>Online Status</h3>
+						<p>MQTT clients can track whether an Instance ID has any connected UI3 instances by looking at children of the <code>ui3/instance_id/online</code> topic as shown in the following screenshot from <a href="http://mqtt-explorer.com/">MQTT Explorer</a>:</p>
+						<p>
+							<img class="img-responsive" mysrc="img/MqttSample.png" alt="MQTT Explorer Screenshot" style="margin-bottom: 5px;" />
+						</p>
+						<p>The above example shows two UI3 windows both sharing the same Instance ID.  One UI3 window is publishing and subscribed to <code>ui3/test_id/state/#</code>, while the other has an advanced configuration where it is only subscribing but not publishing its own local state changes.</p>
+						<p>The 16-character alphanumeric sequences seen here are randomly generated by each browser window running UI3 so that individual browser windows can report their online status to MQTT without overwriting each other when they share an Instance ID.  The possible status messages are <code>pub/sub</code>, <code>pub only</code>, <code>sub only</code>, indicating which functionality is enabled for that browser window.</p>
+						<h3>Tips</h3>
+						<p>If you have trouble understanding how MQTT works, I suggest using <a href="http://mqtt-explorer.com/">MQTT Explorer</a> to view the activity on your MQTT broker in real-time.  This will enable you to easily see what UI3 is doing with MQTT topics.  The tool can also publish messages so you can use it to test UI3's remote control capability.</p>
+						<p>The "All cameras" group is not actually named <code>All cameras</code>. This group is internally named <code>Index</code> and must be referred to as such for remote control purposes.</p>
+						<p>The <code>vid</code> topic is only used for live viewing at this time, but may be extended in the future to support timeline playback or clips/alerts.</p>
+						<p>It is recommended when publishing MQTT messages to UI3, that you always use the "retain" flag.  This provides the most consistent and predictable behavior.</p>
+						<h3>Advanced Configuration</h3>
+						<p>UI3 offers several advanced options for its MQTT client.</p>
+						<p>By default, UI3 performs two-way communication with the MQTT broker, both publishing its own state changes and subscribing to receive state changes from the broker. You can individually toggle the publish and subscribe functions in order to have the remote control work only one-way.</p>
+						<p>MQTT supports 3 different "QOS" values (0, 1, 2) for subscribing and for publishing.  Non-zero QOS values attempt to offer additional guarantees of message delivery, but for most users, QOS 0 is sufficient and it is the fastest option.  Advanced users may choose different QOS values individually for publishing and subscribing.</p>
+						<p>By default, UI3 publishes its state messages with the "Retain" flag set in order to help persist the UI state between page loads.  If desired, you can turn this off.</p>
+					</div><!--/.tab-pane -->
 					<div class="tab-pane" id="export" role="tabpanel" aria-labelledby="nav-export">
 						<h1>Exporting Video</h1>
 						<p>Clips or sections of clips may be exported into MP4, AVI, or WMV formats and then downloaded through UI3.</p>
@@ -620,6 +709,51 @@
 				console.error(ex);
 			}
 
+			try
+			{
+				// Set the current time minus one minute in the Timeline example link on the URL Parameters page
+				$("#timelineLink").attr("href", $("#timelineLink").attr("href") + (Date.now() - 60000));
+				$("#timelineLink").text($("#timelineLink").text() + (Date.now() - 60000));
+			}
+			catch (ex)
+			{
+				console.log("Unable to set timelineLink.");
+				console.error(ex);
+			}
+
+			try
+			{
+				// Copy all navbar links to a list on the Overview page.
+				var navbarLinks = $("#navbar").find("a");
+				var overviewLinks = [];
+				for (var i = 0; i < navbarLinks.length; i++)
+				{
+					var src = navbarLinks.eq(i);
+					var href = src.attr('href');
+					if (href && href !== '#' && href !== '#overview')
+					{
+						var dst = $('<a class="list-group-item"></a>');
+						dst.attr('href', href);
+						dst.html(src.html());
+
+						overviewLinks.push({ key: src.text(), a: dst });
+					}
+				}
+
+				overviewLinks.sort(function (a, b)
+				{
+					return a.key.localeCompare(b.key);
+				});
+
+				var overviewIndex = $("#overviewIndex");
+				for (var i = 0; i < overviewLinks.length; i++)
+					overviewIndex.append(overviewLinks[i].a);
+			}
+			catch (ex)
+			{
+				console.log("Unable to create list of section links in Overview page.");
+				console.error(ex);
+			}
 		})();
 	</script>
 </body>

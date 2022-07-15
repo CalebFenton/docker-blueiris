@@ -11,6 +11,77 @@ if (navigator.cookieEnabled)
 {
 	NavRemoveUrlParams("session");
 }
+/**
+ * Uniquely identifies each UI3 instance (randomly generated during page loading; not persisted outside of memory).
+ * This is sent to /time/ APIs as the argument "opaque" so BI can tell UI3 instances apart when they share the same session.
+ * Otherwise the instances interfere with each other's timeline playback state.
+ */
+var ui3InstanceId = getRandomAlphanumericStr(16);
+//
+///////////////////////////////////////////////////////////////
+// Host Redirection, Proxy Handling ///////////////////////////
+///////////////////////////////////////////////////////////////
+var currentServer =
+{
+	remoteBaseURL: GetAppPath()
+	, remoteServerName: ""
+	, remoteServerUser: ""
+	, remoteServerPass: ""
+	, isLoggingOut: false
+	, isUsingRemoteServer: false
+	, GetAPISessionArg: function (prefix, forceAddArg)
+	{
+		if (currentServer.isUsingRemoteServer || !navigator.cookieEnabled || forceAddArg)
+			return prefix + "session=" + sessionManager.GetAPISession();
+		return "";
+	}
+	, GetLocalSessionArg: function (prefix, forceAddArg)
+	{
+		if (!navigator.cookieEnabled || forceAddArg)
+		{
+			return prefix + "session=" + local_bi_session;
+		}
+		return "";
+	}
+	, SetRemoteServer: function (serverName, baseUrl, user, pass)
+	{
+		if (!currentServer.ValidateRemoteServerNameSimpleRules(serverName))
+		{
+			toaster.Error("Unable to validate remote server name. Connecting to local server instead.", 10000);
+			serverName = "";
+		}
+		if (serverName == "")
+		{
+			currentServer.remoteBaseURL = GetAppPath();
+			currentServer.remoteServerName = "";
+			currentServer.remoteServerUser = "";
+			currentServer.remoteServerPass = "";
+			currentServer.isUsingRemoteServer = false;
+		}
+		else
+		{
+			currentServer.remoteBaseURL = baseUrl;
+			currentServer.remoteServerName = serverName;
+			currentServer.remoteServerUser = user;
+			currentServer.remoteServerPass = pass;
+			currentServer.isUsingRemoteServer = true;
+		}
+	}
+	, ValidateRemoteServerNameSimpleRules: function (val)
+	{
+		if (val.length == 0)
+			return false;
+		if (val.length > 16)
+			return false;
+		for (var i = 0; i < val.length; i++)
+		{
+			var c = val.charAt(i);
+			if ((c < "a" || c > "z") && (c < "A" || c > "Z") && (c < "0" || c > "9") && c != " ")
+				return false;
+		}
+		return true;
+	}
+};
 ///////////////////////////////////////////////////////////////
 // Feature Detect /////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
@@ -36,9 +107,9 @@ function BrowserIsEdgeLegacy()
 }
 function BrowserEdgeVersion()
 {
-	var m = window.navigator.userAgent.match(/ Edge\/([0-9\.,]+)/);
+	var m = window.navigator.userAgent.match(/ Edge\/([0-9.,]+)/);
 	if (!m)
-		m = window.navigator.userAgent.match(/ Edg\/([0-9\.,]+)/);
+		m = window.navigator.userAgent.match(/ Edg\/([0-9.,]+)/);
 	if (m)
 		return m[1];
 	return null;
@@ -85,6 +156,8 @@ function DoUIFeatureDetection()
 		requestAnimationFramePolyFill();
 		if (!isCanvasSupported())
 			MissingRequiredFeature("HTML5 Canvas"); // Excludes IE 8
+		else if (!window.Uint8Array && !window.VBArray)
+			MissingRequiredFeature("Uint8Array or VBArray", "One of these is required for the Jpeg video player since UI3-197.");
 		else
 		{
 			// All critical tests pass
@@ -315,7 +388,7 @@ function requestAnimationFramePolyFill()
 	try
 	{
 		if (typeof requestAnimationFrame != "function")
-			requestAnimationFrame = function (callback) { setTimeout(callback, 33); };
+			window.requestAnimationFrame = function (callback) { setTimeout(callback, 33); };
 		return true;
 	}
 	catch (e)
@@ -474,8 +547,8 @@ var cornerStatusIcons = null;
 var serverTimeLimiter = null;
 var liveVideoPausing = null;
 var genericQualityHelper = null;
-var jpegQualityHelper = null;
 var streamingProfileUI = null;
+var relativePTZ = null;
 var ptzButtons = null;
 var playbackHeader = null;
 var exportControls = null;
@@ -511,6 +584,7 @@ var clipOverlayCfg = null;
 var groupCfg = null;
 var programmaticSoundPlayer = null;
 var sidebarResizeBar = null;
+var mqttClient = null;
 
 var currentPrimaryTab = "";
 
@@ -557,23 +631,23 @@ var togglableUIFeatures =
 // Notes that require BI changes //////////////////////////////
 ///////////////////////////////////////////////////////////////
 
-// TODO: Around May 11, 2018 with BI 4.7.4.1, Blue Iris began enforcing a default jpeg height of 720px sourced from the Streaming 0 profile's frame size setting and I haven't been able to talk the developer out of it.  UI3 now works around this by appending w=99999 to jpeg requests that are intended to be native resolution.  If this limit goes away, the workarounds should be removed.  The workarounds are tagged with "LOC0" (approximately 9 locations).  Since shortly after, this affects quality too, so a q=85 argument has been added at LOC0 locations too.
-
 ///////////////////////////////////////////////////////////////
 // High priority notes ////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
-
-// BUG: If you let a clip play to the end and stop, then reload the page, UI3 tries to open the clip at the very end and it doesn't play any video.  The "video lost" sound plays.
 
 ///////////////////////////////////////////////////////////////
 // Low priority notes /////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 
-// CONSIDER: Advanced canvas-based clip list viewer.  It should use the entire video playback area (maybe hide the left bar too), be zoomable, and very responsive.  Navigate by keyboard or click-and-drag with inertia. Clips arranged like a timeline, with thumbnails moving across the screen horizontally (left = older, right = newer) with dotted vertical lines every minute/hour etc.  Each camera its own row.
+// Clock drift and timezone differences were last tested 2022-03-12 and 2022-02-25.
+// KNOWN: Around May 11, 2018 with BI 4.7.4.1, Blue Iris began imposing Streaming 0's frame size and quality settings on jpeg frames, and I wasn't able to talk the developer out of it.  UI3 works around this by always requesting jpeg snapshots with explicit dimensions and quality.
 // CONSIDER: Add "Remote Control" menu based on that which is available in iOS and Android apps.
-// CONSIDER: Sometimes the clip list scrolls down when you're trying to work with it, probably related to automatic refreshing addings items at the top.
+// KNOWN: Sometimes the clip list scrolls down when you're trying to work with it, probably related to automatic refreshing addings items at the top.
 // KNOWN: Black frame shown when pausing HTML5 player before first frame is rendered. This is caused by destroying the jmuxer instance before the frame has rendered. Skipping or delaying the destroy causes camera-changing weirdness, so this is the lesser nuisance.
 // CONSIDER: Expandable clip list. ("Show more clips")
+// KNOWN: Jpeg snapshots of dynamic groups often are missing some labels because BI returned the frame before drawing them.
+// KNOWN: navigator.mediaSession doesn't work properly. Timeline playback has never been tested with it.
+// KNOWN: Timeline playback does not support audio yet (needs BI support)
 
 ///////////////////////////////////////////////////////////////
 // Settings ///////////////////////////////////////////////////
@@ -650,12 +724,8 @@ var HTML5DelayCompensationOptions = {
 	Normal: "Normal",
 	Strong: "Strong"
 }
-var Zoom1xOptions = {
-	Camera: "Camera",
-	Stream: "Stream"
-}
 var settings = null;
-var settingsCategoryList = ["General Settings", "Video Player", "UI Status Sounds", "Top Bar", "Clips / Alerts", "Clip / Alert Icons", "Event-Triggered Icons", "Event-Triggered Sounds", "Hotkeys", "Camera Labels", "Digital Zoom", "Extra"]; // Create corresponding "ui3_cps_uiSettings_category_" default when adding a category here.
+var settingsCategoryList = ["General Settings", "Video Player", "Timeline", "UI Status Sounds", "Top Bar", "Clips / Alerts", "Clip / Alert Icons", "Event-Triggered Icons", "Event-Triggered Sounds", "Hotkeys", "UI3 Camera Labels", "Digital Zoom", "MQTT Remote Control", "Extra"]; // Create corresponding "ui3_cps_uiSettings_category_" default when adding a category here.
 var defaultSettings =
 	[
 		{
@@ -831,6 +901,10 @@ var defaultSettings =
 			, value: "1"
 		}
 		, {
+			key: "ui3_cps_jp_visible"
+			, value: "1"
+		}
+		, {
 			key: "ui3_cps_mro_visible"
 			, value: "1"
 		}
@@ -883,6 +957,10 @@ var defaultSettings =
 			, value: "1"
 		}
 		, {
+			key: "ui3_cps_uiSettings_category_MQTT_Remote_Control"
+			, value: "1"
+		}
+		, {
 			key: "ui3_cps_uiSettings_category_Extra_visible"
 			, value: "1"
 		}
@@ -908,12 +986,16 @@ var defaultSettings =
 			, category: "Streaming Profiles" // This category isn't shown in UI Settings, but has special-case logic in ui3-local-overrides.js export.
 		}
 		, {
+			key: "ui3_timelineZoomScaler"
+			, value: 13
+		}
+		, {
 			key: "ui3_timeout"
 			, value: 10
 			, inputType: "number"
 			, minValue: 0
 			, maxValue: 525600
-			, label: 'Idle Timeout<div class="settingDesc">The UI will close itself after this many minutes of inactivity. (0 to disable)</div>'
+			, label: 'Idle Timeout<div class="settingDesc">The UI will close itself after this many minutes of inactivity. (0 to disable)<br>Can be set with URL parameter &quot;&amp;timeout=0&quot;</div>'
 			, category: "General Settings"
 		}
 		, {
@@ -1070,17 +1152,18 @@ var defaultSettings =
 			key: "ui3_prioritizeTriggered"
 			, value: "0"
 			, inputType: "checkbox"
-			, label: '<svg class="icon clipicon prioritizeTriggeredButton on"><use xlink:href="#svg_x5F_Alert"></use></svg> Auto-Maximize Enabled'
+			, label: '<svg class="icon noflip clipicon prioritizeTriggeredButton"><use xlink:href="#svg_auto_maximize"></use></svg> Auto-Maximize Enabled'
 			, onChange: OnChange_ui3_prioritizeTriggered
+			, onCreate: OnChange_ui3_prioritizeTriggered
 			, category: "Video Player"
 		}
 		, {
 			key: "ui3_prioritizeTriggered_triggerMode"
-			, value: "Trigger"
+			, value: "Alert"
 			, inputType: "select"
-			, options: ["Trigger", "Motion"]
-			, label: '<svg class="icon clipicon prioritizeTriggeredButton on"><use xlink:href="#svg_x5F_Alert"></use></svg> Auto-Maximize upon...'
-			, hint: '"Motion" uses Blue Iris\'s built-in motion detection.\n\n"Trigger" works with any method of trigger (such as ONVIF or audio), but may not respond as quickly.'
+			, options: ["Alert", "Trigger", "Motion"]
+			, label: '<svg class="icon noflip clipicon prioritizeTriggeredButton"><use xlink:href="#svg_auto_maximize"></use></svg> Auto-Maximize upon...'
+			, hint: '"Motion" uses Blue Iris\'s built-in motion detection.\n\n"Trigger" works with any method of trigger (such as ONVIF or audio), but may not respond as quickly. Trigger happens before AI verification.\n\n"Alert" waits for the camera to begin alerting, which happens after AI verification (if configured).'
 			, category: "Video Player"
 		}
 		, {
@@ -1117,6 +1200,47 @@ var defaultSettings =
 			, label: 'Dynamic Group Layout<div class="settingDesc"><a href="javascript:UIHelp.LearnMore(\'Dynamic Group Layout\')">(learn more)</a></div>'
 			, onChange: OnChange_ui3_dynamicGroupLayout
 			, category: "Video Player"
+		}
+		, {
+			key: "ui3_maxDynamicGroupImageDimension"
+			, value: 1440
+			, minValue: 240
+			, maxValue: 7680
+			, step: 8
+			, inputType: "range"
+			, label: 'Dynamic Group Max Resolution<div class="settingDesc">(strongly affects server CPU usage)</div>'
+			, changeOnStep: false
+			, onChange: OnChange_ui3_maxDynamicGroupImageDimension
+			, category: "Video Player"
+		}
+		, {
+			key: "ui3_playback_skipDeadAir"
+			, value: 0
+			, inputType: "threeState"
+			, label: 'Skip dead-air during playback'
+			, onChange: OnChange_ui3_playback_skipDeadAir
+			, category: "Timeline"
+		}
+		, {
+			key: "ui3_timeline_starfield"
+			, value: "1"
+			, inputType: "checkbox"
+			, label: 'Starfield Background<div class="settingDesc">A little visual flair outside the timeline boundaries.</div>'
+			, category: "Timeline"
+		}
+		, {
+			key: "ui3_timeline_alertBarColor"
+			, value: "#8E3510"
+			, inputType: "color"
+			, label: 'Alert Bar Color'
+			, category: "Timeline"
+		}
+		, {
+			key: "ui3_timeline_alertTrackMarkers"
+			, value: "1"
+			, inputType: "checkbox"
+			, label: 'Alert Track Markers<div class="settingDesc">Marks timeline color bars wherever they were alerted.</div>'
+			, category: "Timeline"
 		}
 		, {
 			key: "ui3_uiStatusSounds"
@@ -1372,7 +1496,7 @@ var defaultSettings =
 			key: "ui3_clipicon_trigger_sentry"
 			, value: "1"
 			, inputType: "checkbox"
-			, label: '<svg class="icon clipicon noflip"><use xlink:href="#sentry_logo"></use></svg> for AI-verified alerts'
+			, label: '<svg class="icon clipicon noflip"><use xlink:href="#svg_mio_cbChecked"></use></svg> for AI-verified alerts'
 			, category: "Clip / Alert Icons"
 		}
 		, {
@@ -1518,8 +1642,20 @@ var defaultSettings =
 			, options: []
 			, getOptions: getBISoundOptions
 			, alwaysRefreshOptions: true
-			, label: 'Camera Triggered'
+			, label: 'Camera Triggered<div class="settingDesc">(before AI-verification)'
 			, onChange: function () { biSoundPlayer.PlayEvent("trigger"); }
+			, category: "Event-Triggered Sounds"
+		}
+		, {
+			key: "ui3_sound_alert"
+			, value: "None"
+			, inputType: "select"
+			, options: []
+			, getOptions: getBISoundOptions
+			, alwaysRefreshOptions: true
+			, label: 'Camera Alerting'
+			, hint: "Occurs only after AI-verification, if AI is configured."
+			, onChange: function () { biSoundPlayer.PlayEvent("alert"); }
 			, category: "Event-Triggered Sounds"
 		}
 		, {
@@ -1572,10 +1708,19 @@ var defaultSettings =
 			, category: "Hotkeys"
 		}
 		, {
+			key: "ui3_hotkey_tab_timeline"
+			, value: "0|0|0|114" // 114: F3
+			, hotkey: true
+			, label: "Load Tab: Timeline"
+			, hint: "Opens the Timeline tab"
+			, actionDown: BI_Hotkey_Load_Tab_Timeline
+			, category: "Hotkeys"
+		}
+		, {
 			key: "ui3_hotkey_cameraLabels"
 			, value: "1|0|0|76" // 76: L
 			, hotkey: true
-			, label: "Toggle Camera Labels"
+			, label: "Toggle UI3 Camera Labels"
 			, actionDown: BI_Hotkey_Toggle_Camera_Labels
 			, category: "Hotkeys"
 		}
@@ -2263,9 +2408,9 @@ var defaultSettings =
 			key: "ui3_cameraLabels_enabled"
 			, value: "0"
 			, inputType: "checkbox"
-			, label: 'Camera Labels Enabled'
+			, label: 'UI3 Camera Labels Enabled<div class="settingDesc"><br>Blue Iris provides its own camera name labels since version 5.5, so UI3\'s clientside labels are no longer recommended.<br><br>Toggle Blue Iris\'s labels using Blue Iris\'s "Edit Layout" functionality (See Blue Iris Help > Cameras > Camera Groups), or toggle the camera names via UI3 by right clicking a group video feed and choosing "Group Settings".</div>'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_multiCameras"
@@ -2273,7 +2418,7 @@ var defaultSettings =
 			, inputType: "checkbox"
 			, label: 'Label multi-camera streams'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_singleCameras"
@@ -2281,7 +2426,7 @@ var defaultSettings =
 			, inputType: "checkbox"
 			, label: 'Label single-camera streams'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_text"
@@ -2290,7 +2435,7 @@ var defaultSettings =
 			, options: [CameraLabelTextValues.Name, CameraLabelTextValues.ShortName, CameraLabelTextValues.Both]
 			, label: "Label Text"
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_position"
@@ -2299,7 +2444,7 @@ var defaultSettings =
 			, options: [CameraLabelPositionValues.Above, CameraLabelPositionValues.Top, CameraLabelPositionValues.Bottom, CameraLabelPositionValues.Below]
 			, label: "Label Position"
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_fontSize"
@@ -2309,18 +2454,18 @@ var defaultSettings =
 			, maxValue: 128
 			, label: "Font Size"
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_minimumFontSize"
-			, value: 6
+			, value: BI_GetDevicePixelRatio() > 1 ? 6 : 8
 			, inputType: "number"
 			, minValue: 0
 			, maxValue: 128
 			, label: "Min Font Size"
 			, hint: "When a group view is rendered smaller than native resolution, font size is scaled down no smaller than this."
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_backgroundColor"
@@ -2328,7 +2473,7 @@ var defaultSettings =
 			, inputType: "color"
 			, label: 'Background Color'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_textColor"
@@ -2336,7 +2481,7 @@ var defaultSettings =
 			, inputType: "color"
 			, label: 'Text Color'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_cameraColor"
@@ -2344,7 +2489,7 @@ var defaultSettings =
 			, inputType: "checkbox"
 			, label: 'Use Camera Color<div class="settingDesc">(ignore colors set above)</div>'
 			, onChange: onui3_cameraLabelsChanged
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_backgroundOpacity"
@@ -2357,7 +2502,7 @@ var defaultSettings =
 			, label: 'Background Opacity'
 			, onChange: onui3_cameraLabelsChanged
 			, changeOnStep: true
-			, category: "Camera Labels"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_cameraLabels_textOpacity"
@@ -2370,27 +2515,17 @@ var defaultSettings =
 			, label: 'Text Opacity'
 			, onChange: onui3_cameraLabelsChanged
 			, changeOnStep: true
-			, category: "Camera Labels"
-		}
-		, {
-			key: "ui3_wheelZoomMethod"
-			, value: "Adjustable"
-			, inputType: "select"
-			, options: ["Adjustable", "Legacy"]
-			, label: "Digital Zoom Method"
-			, onChange: OnChange_ui3_wheelZoomMethod
-			, category: "Digital Zoom"
+			, category: "UI3 Camera Labels"
 		}
 		, {
 			key: "ui3_wheelAdjustableSpeed"
 			, value: 400
-			, minValue: 0
+			, minValue: 20
 			, maxValue: 2000
 			, step: 1
 			, inputType: "range"
-			, label: 'Digital Zoom Speed<br/>(Requires zoom method "Adjustable")'
+			, label: 'Digital Zoom Speed'
 			, changeOnStep: true
-			, hint: "Default: 400"
 			, category: "Digital Zoom"
 		}
 		, {
@@ -2402,13 +2537,119 @@ var defaultSettings =
 			, category: "Digital Zoom"
 		}
 		, {
-			key: "ui3_zoom1x_mode"
-			, value: Zoom1xOptions.Camera
-			, inputType: "select"
-			, options: [Zoom1xOptions.Camera, Zoom1xOptions.Stream]
-			, label: 'At 1x zoom, match resolution of: '
-			, hint: 'Choose "' + Zoom1xOptions.Stream + '" if clip playback has the wrong aspect ratio.'
+			key: "ui3_alwaysAllow1xVideoZoom"
+			, value: "0"
+			, inputType: "checkbox"
+			, label: 'Always Allow 1x Zoom<div class="settingDesc">(if "yes", small cameras can be rendered smaller than the viewport)</div>'
 			, category: "Digital Zoom"
+		}
+		, {
+			key: "ui3_browserZoomEnabled"
+			, value: "0"
+			, inputType: "checkbox"
+			, label: 'Browser Native Zoom<div class="settingDesc">(enabling this will disable ui3\'s video player touchscreen pinch handling)</div>'
+			, onChange: OnChange_ui3_browserZoomEnabled
+			, category: "Digital Zoom"
+		}
+		, {
+			key: "ui3_comment_mqtt_learnmore"
+			, value: ""
+			, inputType: "comment"
+			, comment: function () { return '<div style="text-align: center;"><a href="ui3/help/help.html' + currentServer.GetLocalSessionArg("?") + '#mqtt">Help Link: MQTT Remote Control</a></div>'; }
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttBrokerUrl"
+			, value: ""
+			, inputType: "text"
+			, class: "column_reverse"
+			, label: 'WebSocket URL to connect to MQTT broker<div class="settingDesc">(example: <code>ws://homeassistant.local:1884/</code>)</div>'
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttUser"
+			, value: ""
+			, inputType: "text"
+			, label: 'MQTT User Name'
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttPass"
+			, value: ""
+			, inputType: "password"
+			, label: 'MQTT Password'
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttInstanceId"
+			, value: GetRandomMqttInstanceId
+			, maxValue: 12
+			, inputType: "text"
+			, label: 'Instance ID<div class="settingDesc">(Uniquely identifies this UI3)</div>'
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttClientEnabled"
+			, value: "0"
+			, inputType: "checkbox"
+			, label: 'Enable MQTT Client<div class="settingDesc">(toggle to reconnect with new settings)</div>'
+			, onChange: OnChange_ui3_mqttClientEnabled
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_comment_mqtt_advanced"
+			, value: ""
+			, inputType: "comment"
+			, comment: function ()
+			{
+				return 'The following are <b>advanced configuration</b> options, recommended only for MQTT experts. Please read the <a href="ui3/help/help.html'
+					+ currentServer.GetLocalSessionArg("?") + '#mqtt">help file</a> to better-understand the function of each advanced option.</div>';
+			}
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttSubscribeEnabled"
+			, value: "1"
+			, inputType: "checkbox"
+			, label: 'Subscribe to /state/ Topics'
+			, hint: "Disabling this will disable inbound state synchronization with the MQTT broker."
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttSubscribeQOS"
+			, value: 0
+			, inputType: "number"
+			, minValue: 0
+			, maxValue: 2
+			, label: 'Subscribe QOS'
+			, hint: "The MQTT QOS value (0,1,2) that is sent when subscribing to the /state/ topics."
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttPublishEnabled"
+			, value: "1"
+			, inputType: "checkbox"
+			, label: 'Publish to /state/ Topics'
+			, hint: "Disabling this will disable outbound state synchronization with the MQTT broker."
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttPublishQOS"
+			, value: 0
+			, inputType: "number"
+			, minValue: 0
+			, maxValue: 2
+			, label: 'Publish QOS'
+			, hint: "The MQTT QOS value (0,1,2) that is sent when publishing to the /state/ topics."
+			, category: "MQTT Remote Control"
+		}
+		, {
+			key: "ui3_mqttPublishRetain"
+			, value: "1"
+			, inputType: "checkbox"
+			, label: 'Publish Retain'
+			, hint: "If enabled, UI3 will set the Retain flag when publishing to the /state/ topics."
+			, category: "MQTT Remote Control"
 		}
 		, {
 			key: "ui3_fullscreen_videoonly"
@@ -2533,7 +2774,12 @@ function LoadDefaultSettings()
 		if (settings.getItem(defaultSettings[i].key) == null
 			|| defaultSettings[i].AlwaysReload
 			|| IsNewGeneration(defaultSettings[i].key, defaultSettings[i].Generation))
-			settings.setItem(defaultSettings[i].key, defaultSettings[i].value);
+		{
+			if (typeof defaultSettings[i].value === 'function')
+				settings.setItem(defaultSettings[i].key, defaultSettings[i].value());
+			else
+				settings.setItem(defaultSettings[i].key, defaultSettings[i].value);
+		}
 	}
 }
 function RevertSettingsToDefault()
@@ -2787,6 +3033,8 @@ $(function ()
 
 	setSystemNameButtonState();
 
+	relativePTZ = new RelativePTZ();
+
 	ptzButtons = new PtzButtons();
 
 	if (!any_h264_playback_supported)
@@ -2827,17 +3075,30 @@ $(function ()
 		{
 			$("#layoutleftLive").show();
 			$("#layoutleftRecordings").hide();
-			//$("#layoutbottom").hide();
+			$("#layoutbottomTimeline").hide();
+			$("body").removeClass("tabTimeline");
+			if (videoPlayer && videoPlayer.Loading().image.isTimeline())
+				videoPlayer.goLive();
 		}
-		else
+		else if (currentPrimaryTab == "clips")
 		{
 			$("#layoutleftLive").hide();
 			$("#layoutleftRecordings").show();
-			//$("#layoutbottom").show();
+			$("#layoutbottomTimeline").hide();
+			$("body").removeClass("tabTimeline");
 			$("#recordingsFilterByHeading").text("Filter by:");
+			if (videoPlayer && videoPlayer.Loading().image.isTimeline())
+				videoPlayer.goLive();
+		}
+		else if (currentPrimaryTab == "timeline")
+		{
+			$("#layoutleftLive").hide();
+			$("#layoutleftRecordings").hide();
+			$("#layoutbottomTimeline").show();
+			$("body").addClass("tabTimeline");
 		}
 
-		if (!skipLoadingFirstVideoStream && (settings.ui3_openARecording === "First" || settings.ui3_openARecording === "Last"))
+		if (!skipLoadingAllVideoStreams && !skipLoadingFirstVideoStream && (settings.ui3_openARecording === "First" || settings.ui3_openARecording === "Last"))
 			clipLoader.OpenARecordingAfterNextClipListLoad();
 
 		BI_CustomEvent.Invoke("TabLoaded_" + currentPrimaryTab);
@@ -2894,8 +3155,6 @@ $(function ()
 	liveVideoPausing = new LiveVideoPausing();
 
 	genericQualityHelper = new GenericQualityHelper();
-
-	jpegQualityHelper = new JpegQualityHelper();
 
 	streamingProfileUI = new StreamingProfileUI();
 
@@ -2968,6 +3227,8 @@ $(function ()
 
 	sidebarResizeBar = new SidebarResizeBar();
 
+	mqttClient = new MqttClient();
+
 	togglableContextMenus = new Array();
 	for (var i = 0; i < togglableUIFeatures.length; i++)
 	{
@@ -2998,6 +3259,7 @@ $(function ()
 	OnChange_ui3_ir_brightness_contrast();
 	OnChange_ui3_ptzHome();
 	OnChange_ui3_sideBarPosition();
+	OnChange_ui3_browserZoomEnabled();
 
 	// This makes it impossible to text-select or drag certain UI elements.
 	makeUnselectable($("#layouttop, #layoutleft, #layoutdivider, #layoutbody"));
@@ -3005,7 +3267,6 @@ $(function ()
 	sessionManager.Initialize();
 
 	$(window).resize(resized);
-	$(window).resize(debounce(AfterWindowResized, 250));
 	$('.topbar_tab[name="' + currentPrimaryTab + '"]').click(); // this calls resized()
 
 	window.addEventListener("beforeunload", function ()
@@ -3018,11 +3279,6 @@ $(function ()
 
 	BI_CustomEvent.Invoke("UI_Loading_End");
 });
-function AfterWindowResized()
-{
-	if (cameraListLoader.isDynamicLayoutEnabled(videoPlayer.Loading().image.id, true) && !groupCfg.GetLockedResolution(videoPlayer.Loading().image.id))
-		videoPlayer.ReopenStreamAtCurrentSeekPosition();
-}
 function OnChange_ui3_dynamicGroupLayout()
 {
 	videoPlayer.ReopenStreamAtCurrentSeekPosition();
@@ -3034,7 +3290,7 @@ function ValidateTabName(tabName)
 		settings.ui3_current_dbView = "alerts";
 		return "clips";
 	}
-	if (tabName === "live" || tabName === "clips")
+	if (tabName === "live" || tabName === "clips" || tabName === "timeline")
 		return tabName;
 	return "live";
 }
@@ -3084,6 +3340,8 @@ function ReloadInterface()
 // Incoming URL Parameters ////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 var skipLoadingFirstVideoStream = false;
+var skipLoadingAllVideoStreams = false;
+var startupTimelineMs = null;
 function HandlePreLoadUrlParameters()
 {
 	// Parameter "tab"
@@ -3094,6 +3352,8 @@ function HandlePreLoadUrlParameters()
 			tab = "live";
 		if (tab.toUpperCase() === "C")
 			tab = "clips";
+		if (tab.toUpperCase() === "T")
+			tab = "timeline";
 		settings.ui3_defaultTab = tab;
 	}
 
@@ -3109,23 +3369,17 @@ function HandlePreLoadUrlParameters()
 		settings.ui3_defaultCameraGroupId = group;
 		BI_CustomEvent.AddListener("FinishedLoading", function ()
 		{
-			var camData = cameraListLoader.GetCameraWithId(group);
-			if (camData != null)
-				videoPlayer.SelectCameraGroup(group);
+			if (!mqttClient.preLoadVideoSpecified)
+			{
+				var camData = cameraListLoader.GetCameraWithId(group);
+				if (camData != null && videoPlayer.Loading().image.id !== group)
+					videoPlayer.SelectCameraGroup(group);
+			}
 		});
 	}
 
-	// Parameter "cam"
-	var cam = UrlParameters.Get("cam", "c");
-	if (cam !== '')
-	{
-		BI_CustomEvent.AddListener("FinishedLoading", function ()
-		{
-			var camData = cameraListLoader.GetCameraWithId(cam);
-			if (camData != null)
-				videoPlayer.ImgClick_Camera(camData);
-		});
-	}
+	// Parameter "cam" is handled in the LoadCameraList method
+
 	var maximize = UrlParameters.Get("maximize", "m");
 	if (maximize === "1" || maximize.toLowerCase() === "true")
 		settings.ui3_is_maximized = "1";
@@ -3157,10 +3411,41 @@ function HandlePreLoadUrlParameters()
 		loadingHelper.SetLoadedStatus("startupClip");
 	}
 
+	// Parameter "timeline", value is a millisecond timestamp
+	var timelineMs = UrlParameters.Get("timeline", "tl");
+	if (timelineMs !== '')
+	{
+		timelineMs = parseInt(timelineMs);
+		if (!isNaN(timelineMs) && timelineMs > 0)
+		{
+			settings.ui3_defaultTab = "timeline";
+			skipLoadingAllVideoStreams = true;
+			startupTimelineMs = timelineMs;
+		}
+		else
+			console.log('"timeline"/"tl" URL parameter received invalid value: ' + UrlParameters.Get("timeline", "tl"));
+	}
+	else
+	{
+		$("#loadingStartupClip").parent().hide();
+		loadingHelper.SetLoadedStatus("startupClip");
+	}
+
 	// Parameter "streamingprofile"
 	var streamingprofile = UrlParameters.Get("streamingprofile", "p");
 	if (streamingprofile !== '')
 		settings.ui3_streamingQuality = streamingprofile;
+
+	// Parameter "timeout"
+	var timeoutParam = UrlParameters.Get("timeout", "to");
+	if (timeoutParam !== '')
+	{
+		var timeoutInt = parseInt(timeoutParam);
+		if (!isNaN(timeoutInt) && timeoutInt >= 0 && timeoutInt <= 525600)
+			settings.ui3_timeout = timeoutInt;
+		else
+			console.log('"timeout"/"to" URL parameter received invalid value: ' + timeoutParam);
+	}
 }
 function StartupClipOpener(recId, offset)
 {
@@ -3179,7 +3464,11 @@ function StartupClipOpener(recId, offset)
 			else
 			{
 				if (offset && offset > 0)
+				{
+					if (offset > stats.msec || stats.msec - offset < 100)
+						offset = 0;
 					stats.offset = offset;
+				}
 			}
 			loadingHelper.SetLoadedStatus("startupClip");
 
@@ -3287,10 +3576,26 @@ function resized()
 
 	// Size layoutsidebar
 	var sidebarT = topH;
-	if (portrait)
+	var $dragBar = $("#sidebarPortraitDragbar");
+	if (settings.ui3_is_maximized !== "1")
 	{
-		sidebarH = Math.round(sidebarResizeBar.getSidebarSize() * (windowH - topH - botH));
-		sidebarT = windowH - sidebarH;
+		if (currentPrimaryTab == "timeline")
+		{
+			if (portrait)
+				sidebarH = statusH;
+			else
+				sidebarH = botH;
+			sidebarT = windowH - sidebarH;
+			$dragBar.hide();
+		}
+		else if (portrait)
+		{
+			sidebarH = Math.round(sidebarResizeBar.getSidebarSize() * (windowH - topH - botH));
+			sidebarT = windowH - sidebarH;
+			$dragBar.show();
+		}
+		else
+			$dragBar.hide();
 	}
 	layoutsidebar.css("top", sidebarT + "px");
 	layoutsidebar.css("height", sidebarH + "px");
@@ -3313,7 +3618,7 @@ function resized()
 			sidebarStuff.css("margin", "");
 		}
 	}
-	else
+	else if (currentPrimaryTab == "clips")
 	{
 		var llrControlsH = llrControls.outerHeight(true);
 		if (portrait)
@@ -3337,13 +3642,13 @@ function resized()
 	statusArea.css("width", (sidebarW - statusArea_margins) + "px");
 
 	// Size layoutbody
-	var bodyL = (portrait || sideBarRight) ? 0 : sidebarW;
+	var bodyL = (portrait || sideBarRight || currentPrimaryTab == "timeline") ? 0 : sidebarW;
 	var bodyT = topH;
 	var bodyW = windowW;
 	var bodyH = windowH - topH - botH;
 	if (portrait)
 		bodyH -= sidebarH;
-	else
+	else if (currentPrimaryTab != "timeline")
 		bodyW -= sidebarW;
 	layoutbody.css("top", bodyT + "px");
 	layoutbody.css("left", bodyL + "px");
@@ -3503,9 +3808,15 @@ function UiSizeHelper()
 	{
 		var $roots = $('body');
 		if (portrait)
+		{
 			$roots.addClass("portrait");
+			$roots.removeClass("landscape");
+		}
 		else
+		{
 			$roots.removeClass("portrait");
+			$roots.addClass("landscape");
+		}
 	}
 
 	SetSize(settings.ui3_preferred_ui_scale);
@@ -3825,7 +4136,7 @@ function DropdownBoxes()
 {
 	var self = this;
 	var handleElements = {};
-	var $dropdownBoxes = $(".dropdownBox,#btn_main_menu,.dropdownTrigger");
+	var $dropdownBoxes = $(".dropdownBox,#btn_main_menu,.dropdownTrigger,#changeGroupButton");
 	var currentlyOpenList = null;
 	var preventDDLClose = false;
 
@@ -3887,7 +4198,7 @@ function DropdownBoxes()
 				{
 					var camData = cameraListLoader.GetCameraWithId(item.id);
 					if (camData)
-						videoPlayer.LoadLiveCamera(camData);
+						videoPlayer.LoadLiveCamera(camData, clipTimeline.getTimelineArgsForCameraSwitch());
 					else
 						videoPlayer.LoadHomeGroup();
 				}
@@ -4043,6 +4354,13 @@ function DropdownBoxes()
 				}
 			}
 		});
+	function GetNumberedDropdownListItems(name, min, max)
+	{
+		var items = [];
+		for (var i = min; i <= max; i++)
+			items.push(new DropdownListItem({ cmd: i.toString(), text: name + " " + i }));
+		return items;
+	}
 	this.listDefs["dbView"] = new DropdownListDefinition("dbView",
 		{
 			onItemClick: function (item)
@@ -4080,7 +4398,9 @@ function DropdownBoxes()
 				this.items.push(new DropdownListItem({ id: "flagged", text: "Flagged", icon: "#svg_x5F_Flag", iconClass: "smallIcon" }));
 				this.items.push(new DropdownListItem({ id: "new.clipboard", text: "Clipboard", icon: "#svg_mio_crop", iconClass: "smallIcon" }));
 				this.items.push(new DropdownListItem({ id: "cancelled", text: "Cancelled alerts", icon: "#svg_x5F_HoldProfile", iconClass: "smallIcon" }));
-				this.items.push(new DropdownListItem({ id: "confirmed", text: "Confirmed alerts", icon: "#sentry_logo", iconClass: "smallIcon" }));
+				this.items.push(new DropdownListItem({ id: "confirmed", text: "Confirmed alerts", icon: "#svg_mio_cbChecked", iconClass: "smallIcon greenIcon" }));
+				this.items.push(new DropdownListItem({ id: "people", text: "Person alerts", icon: "#svg_mio_man", iconClass: "smallIcon orangeIcon" }));
+				this.items.push(new DropdownListItem({ id: "vehicles", text: "Vehicle alerts", icon: "#svg_mio_directions_car", iconClass: "smallIcon orangeIcon" }));
 
 				this.items.push(new DropdownListItem({ id: "separator" }));
 
@@ -4103,6 +4423,7 @@ function DropdownBoxes()
 				this.items.push(new DropdownListItem({ id: "separator" }));
 
 				this.items.push(new DropdownListItem({ id: "memos", text: "Memos", icon: "#blank", iconClass: "smallIcon" }));
+				this.items.push(new DropdownListItem({ id: "protected", text: "Protected", icon: "#svg_mio_lock", iconClass: "smallIcon" }));
 				this.items.push(new DropdownListItem({ id: "archive", text: "FTP backup queue", icon: "#svg_mio_cloudUploading", iconClass: "smallIcon" }));
 				this.items.push(new DropdownListItem({ id: "export", text: "Convert/Export queue", icon: "#svg_mio_launch", iconClass: "smallIcon" }));
 
@@ -4135,13 +4456,20 @@ function DropdownBoxes()
 			name = defaultName;
 		items.push(new DropdownListItem({ id: id, text: name, icon: icon, iconClass: "smallIcon" }));
 	}
-	function GetNumberedDropdownListItems(name, min, max)
-	{
-		var items = [];
-		for (var i = min; i <= max; i++)
-			items.push(new DropdownListItem({ cmd: i.toString(), text: name + " " + i }));
-		return items;
-	}
+
+	this.listDefs["profile"] = new DropdownListDefinition("profile",
+		{
+			onItemClick: function (item)
+			{
+				statusLoader.LoadProfile(parseInt(item.id.substr("profile".length)));
+			}
+			, rebuildItems: function (data)
+			{
+				this.items = [];
+				for (var i = 0; i < 8; i++)
+					this.items.push(new DropdownListItem({ id: "profile" + i, text: statusLoader.getProfileDropdownHtml(i), isHtml: true }));
+			}
+		});
 
 	$dropdownBoxes.each(function (idx, ele)
 	{
@@ -4154,6 +4482,7 @@ function DropdownBoxes()
 			return;
 		}
 		ele.extendLeft = $ele.attr("extendLeft") == "1";
+		ele.extendUp = $ele.attr("extendUp") == "1";
 		if ($ele.hasClass('dropdownBox'))
 		{
 			ele.$label = $('<div class="dropdownLabel"></div>');
@@ -4235,30 +4564,13 @@ function DropdownBoxes()
 				}
 			}
 	}
-	var getFirstVisibleEle = function (name)
+	var LoadDropdownList = function (name, $ele)
 	{
-		var handleEles = handleElements[name];
-		if (handleEles)
-			for (var i = 0; i < handleEles.length; i++)
-			{
-				var ele = handleEles[i];
-				if (ele && $(ele).is(":visible"))
-					return ele;
-			}
-		return null;
-	}
-	var LoadDropdownList = function (name, $parent)
-	{
-		var ele = getFirstVisibleEle(name);
-		if (ele == null)
-			return;
 		var listDef = self.listDefs[name];
 		if (listDef == null)
 			return;
 		if (new Date().getTime() - 33 <= listDef.timeClosed)
 			return;
-		var $ele = $(ele);
-		var offset = $ele.offset();
 
 		var $ddl = listDef.$currentListEle = $('<div class="dropdown_list"></div>');
 		$ddl.on("mouseup", function ()
@@ -4274,8 +4586,8 @@ function DropdownBoxes()
 
 		$("body").append($ddl);
 
-		if ($parent.length > 0)
-			$ddl.css('min-width', $parent.innerWidth() + "px");
+		if ($ele.length > 0)
+			$ddl.css('min-width', $ele.innerWidth() + "px");
 
 		if (name == "mainMenu")
 		{
@@ -4288,14 +4600,17 @@ function DropdownBoxes()
 		var windowW = $(window).width();
 		var width = $ddl.outerWidth();
 		var height = $ddl.outerHeight();
+		var offset = $ele.offset();
 		var top = (offset.top + $ele.outerHeight());
 		var left = offset.left;
-		if (ele.extendLeft)
+		if ($ele.get(0).extendLeft)
 		{
 			left = (left + $ele.outerWidth()) - width;
 			if ((BrowserIsIE() || BrowserIsEdgeLegacy()) && height > windowH)
 				left -= 20; // Workaround for Edge/IE bug that renders scroll bar offscreen
 		}
+		if ($ele.get(0).extendUp)
+			top = offset.top - height;
 
 		// Adjust box position so the box doesn't extend off the bottom, top, right, left, in that order.
 		if (top + height > windowH)
@@ -4573,6 +4888,7 @@ function PtzButtons()
 	var $irButtonLabel = $("#irButtonLabel");
 	var $brightnessButtonLabel = $("#brightnessButtonLabel");
 	var $contrastButtonLabel = $("#contrastButtonLabel");
+	var $ptzRelativeToggle = $("#ptzRelativeToggle");
 
 	var hitPolys = {};
 	hitPolys["PTZzoomIn"] = [[64, 64], [82, 82], [91, 77], [99, 77], [106, 81], [126, 64], [116, 58], [105, 53], [86, 53], [74, 58]];
@@ -4822,6 +5138,19 @@ function PtzButtons()
 			$ptzHome.addClass("disabled");
 			setColor($ptzBackgroundGraphics, ptzpadDisabledColor);
 		}
+		var currentCam = cameraListLoader.GetCameraWithId(videoPlayer.Loading().image.id);
+		if (videoPlayer.Loading().image.isLive && currentCam && currentCam.ptzdirect && ptzControlsEnabled)
+		{
+			$ptzRelativeToggle.removeClass("disabled");
+			$ptzRelativeToggle.removeAttr("disabled");
+			$ptzRelativeToggle.attr('title', "Clicking this button will toggle 3D Positioning mode, where you can click or drag within a PTZ camera's view to move/zoom the camera.\n\nTo use 3D Positioning without this button activated, use the middle mouse button or hold the CTRL key.");
+		}
+		else
+		{
+			$ptzRelativeToggle.addClass("disabled");
+			$ptzRelativeToggle.attr("disabled", "disabled");
+			$ptzRelativeToggle.attr('title', "3D Positioning is not available from the current camera.\n\nAs of Blue Iris 5.5.6.19, the only PTZ protocol that fully supports 3D positioning is \"Dahua New V4\".");
+		}
 	}
 	this.isEnabledNow = function ()
 	{
@@ -4922,6 +5251,20 @@ function PtzButtons()
 			return;
 		}
 		self.PTZ_async_noguarantee(videoPlayer.Loading().image.id, 100 + parseInt(presetNumber));
+	}
+	this.PTZ_relative = function (x, y, z, onSuccess, onFail)
+	{
+		if (!ptzControlsEnabled)
+			return;
+		if (!videoPlayer.Loading().image.ptz)
+		{
+			toaster.Error("Current camera is not PTZ");
+			return;
+		}
+		x = Clamp(x, 0, 1);
+		y = Clamp(y, 0, 1);
+		z = Clamp(z, -1, 1);
+		self.PTZ_async_noguarantee(videoPlayer.Loading().image.id, 4, undefined, { xperc: x, yperc: y, zperc: z }, onSuccess, onFail);
 	}
 	var PTZ_set_preset = function (presetNumber, description)
 	{
@@ -5086,20 +5429,48 @@ function PtzButtons()
 			}
 		}
 	}
-	this.PTZ_async_noguarantee = function (cameraId, ptzCmd, updown)
+	this.PTZ_async_noguarantee = function (cameraId, ptzCmd, updown, extraArgs, onSuccess, onFail)
 	{
 		var args = { cmd: "ptz", camera: cameraId, button: parseInt(ptzCmd) };
 		if (updown == "1")
 			args.updown = 1;
 		else if (updown == "2")
 			args.button = 64;
+		if (extraArgs)
+			args = $.extend(args, extraArgs);
 		ExecJSON(args, function (response)
 		{
-		}, function ()
+			if (response && response.result === "success")
+			{
+				if (typeof onSuccess === "function")
+					onSuccess();
+			}
+			else
+			{
+				if (typeof onFail !== "function")
+					onFail = function (messageHtml) { toaster.Error("PTZ command failed. " + messageHtml); }
+
+				if (!response)
+					onFail("No response body.");
+				else if (response.result && response.result === "fail")
+				{
+					if (response.status)
+						onFail("Status: " + htmlEncode(response.status));
+					else if (response.data && response.data.reason)
+						onFail("Reason: " + htmlEncode(response.data.reason));
+					else
+						onFail("No failure reason was given.");
+				}
+				else
+					onFail("Unexpected response: " + htmlEncode(JSON.stringify(response)));
+			}
+		}, function (jqXHR, textStatus, errorThrown)
 		{
+			if (typeof onFail === "function")
+				onFail(jqXHR.ErrorMessageHtml);
 		});
 	}
-	this.PTZ_unsafe_async_guarantee = function (cameraId, ptzCmd, updown)
+	this.PTZ_unsafe_async_guarantee = function (cameraId, ptzCmd, updown, extraArgs)
 	{
 		unsafePtzActionInProgress = true;
 		var args = { cmd: "ptz", camera: cameraId, button: parseInt(ptzCmd) };
@@ -5107,6 +5478,8 @@ function PtzButtons()
 			args.updown = 1;
 		else if (updown == "2")
 			args.button = 64;
+		if (extraArgs)
+			args = $.extend(args, extraArgs);
 		ExecJSON(args, function (response)
 		{
 			unsafePtzActionInProgress = false;
@@ -5123,7 +5496,7 @@ function PtzButtons()
 			}, 100);
 		});
 	}
-	this.PTZ_unsafe_sync_guarantee = function (cameraId, ptzCmd, updown)
+	this.PTZ_unsafe_sync_guarantee = function (cameraId, ptzCmd, updown, extraArgs)
 	{
 		unsafePtzActionInProgress = true;
 		var args = { cmd: "ptz", camera: cameraId, button: parseInt(ptzCmd) };
@@ -5131,6 +5504,8 @@ function PtzButtons()
 			args.updown = 1;
 		else if (updown == "2")
 			args.button = 64;
+		if (extraArgs)
+			args = $.extend(args, extraArgs);
 		ExecJSON(args, function (response)
 		{
 			unsafePtzActionInProgress = false;
@@ -5181,6 +5556,203 @@ function PtzButtons()
 			currentPtzData.contrast = contrast;
 		$contrastButtonLabel.text("Contrast " + currentPtzData.contrast);
 	}
+}
+///////////////////////////////////////////////////////////////
+// Relative PTZ GUI ///////////////////////////////////////////
+///////////////////////////////////////////////////////////////
+function RelativePTZ()
+{
+	var self = this;
+	var initialized = false;
+	var enabled3dPositioning = false;
+	var pos3dX = 0;
+	var pos3dY = 0;
+	var pos3dDragging = false;
+	var box = $("#relativeptzbox");
+	var $camimg_wrapper = $("#camimg_wrapper");
+
+	function Initialize()
+	{
+		if (initialized)
+			return;
+		initialized = true;
+
+		BindEvents($camimg_wrapper.get(0), 'mousedown touchstart', ImageArea_MouseDown);
+		BindEvents(document, 'mousemove touchmove', MouseMove);
+		BindEvents(document, 'mouseleave', function (e)
+		{
+			mouseCoordFixer.fix(e);
+			EndPos3dDragging(e.mouseX, e.mouseY);
+		});
+		BindEvents(document, 'mouseup touchend', function (e)
+		{
+			mouseCoordFixer.fix(e);
+			EndPos3dDragging(e.mouseX, e.mouseY);
+		});
+		BindEvents(document, 'touchcancel', function (e)
+		{
+			mouseCoordFixer.fix(e);
+			pos3dDragging = false;
+			hideRelPtzBox();
+		});
+	}
+	function EndPos3dDragging(mx, my)
+	{
+		if (pos3dDragging)
+		{
+			pos3dDragging = false;
+			hideRelPtzBox();
+
+			var boxSpec = { x: pos3dX, y: pos3dY, w: mx - pos3dX, h: my - pos3dY };
+
+			var w = mx - pos3dX;
+			var h = my - pos3dY;
+
+			if (Math.abs(w) < 10 && Math.abs(h) < 10)
+				w = h = 0;
+
+			var imgFrameOffset = $camimg_wrapper.offset();
+			var zoomFactor = imageRenderer.zoomHandler.GetZoomFactor();
+			var imgFrameW = $camimg_wrapper.width() * zoomFactor;
+			var imgFrameH = $camimg_wrapper.height() * zoomFactor;
+			var z = Math.max(Math.abs(w / imgFrameW), Math.abs(h / imgFrameH));
+			if (w < 0)
+				z *= -1;
+			var xperc = ((pos3dX - imgFrameOffset.left) + (w / 2)) / imgFrameW;
+			var yperc = ((pos3dY - imgFrameOffset.top) + (h / 2)) / imgFrameH;
+
+			ptzButtons.PTZ_relative(xperc, yperc, z, function () { self.flashRelPtzBox(boxSpec.x, boxSpec.y, boxSpec.w, boxSpec.h); });
+		}
+	}
+	function Precon_3dPos(e)
+	{
+		if (!videoPlayer.Loading().image.isLive)
+			return;
+		var currentCam = cameraListLoader.GetCameraWithId(videoPlayer.Loading().image.id);
+		if (!currentCam || !currentCam.ptz || !currentCam.ptzdirect)
+			return;
+		return (e.which === 2 || enabled3dPositioning ||
+			(e.getModifierState && e.getModifierState("Control")));
+	}
+	function ImageArea_MouseDown(e)
+	{
+		if (pos3dDragging)
+		{
+			pos3dDragging = false;
+			hideRelPtzBox();
+			return;
+		}
+		if (Precon_3dPos(e))
+		{
+			videoPlayer.suppressMouseHelper(true);
+			mouseCoordFixer.fix(e);
+			pos3dX = e.mouseX;
+			pos3dY = e.mouseY;
+			pos3dDragging = true;
+			e.preventDefault();
+			e.stopPropagation();
+		}
+	}
+	function ImageArea_MouseLeave(e)
+	{
+		mouseCoordFixer.fix(e);
+		var ofst = $camimg_wrapper.offset();
+		var zoomFactor = imageRenderer.zoomHandler.GetZoomFactor();
+		var imgFrameW = $camimg_wrapper.width() * zoomFactor;
+		var imgFrameH = $camimg_wrapper.height() * zoomFactor;
+		if (e.mouseX < ofst.left || e.mouseY < ofst.top || e.mouseX >= ofst.left + imgFrameW || e.mouseY >= ofst.top + imgFrameH)
+		{
+			EndPos3dDragging(e.mouseX, e.mouseY);
+		}
+	}
+	function MouseMove(e)
+	{
+		mouseCoordFixer.fix(e);
+		if (pos3dDragging)
+			showRelPtzBox(pos3dX, pos3dY, e.mouseX - pos3dX, e.mouseY - pos3dY);
+	}
+	function showRelPtzBox(x, y, w, h)
+	{
+		if (developerMode)
+		{
+			var imgFrameOffset = $camimg_wrapper.offset();
+			var zoomFactor = imageRenderer.zoomHandler.GetZoomFactor();
+			var imgFrameW = $camimg_wrapper.width() * zoomFactor;
+			var imgFrameH = $camimg_wrapper.height() * zoomFactor;
+			var z = Math.max(Math.abs(w / imgFrameW), Math.abs(h / imgFrameH));
+			if (w < 0)
+				z *= -1;
+			var xperc = ((pos3dX - imgFrameOffset.left) + (w / 2)) / imgFrameW;
+			var yperc = ((pos3dY - imgFrameOffset.top) + (h / 2)) / imgFrameH;
+
+			box.html('<div class="relativePtzDebugText">'
+				+ 'X: ' + xperc.toFixed(3)
+				+ ', Y: ' + yperc.toFixed(3)
+				+ ', Z: ' + z.toFixed(3)
+				+ ', imgFrameW: ' + imgFrameW.toFixed(3)
+				+ ', imgFrameH: ' + imgFrameH.toFixed(3)
+				+ '</div > ');
+		}
+		else
+			box.html('');
+
+		var blueBox = false;
+		if (w < 0)
+		{
+			x += w;
+			w *= -1;
+			blueBox = true;
+		}
+		if (h < 0)
+		{
+			y += h;
+			h *= -1;
+		}
+		box.css("border-color", blueBox ? "Blue" : "Red");
+		box.css("left", (x - 3) + "px");
+		box.css("top", (y - 3) + "px");
+		box.css("width", (w) + "px");
+		box.css("height", (h) + "px");
+
+		box.stop(true, true);
+		box.show();
+	}
+	function hideRelPtzBox()
+	{
+		box.stop(true, true);
+		box.hide();
+	}
+	this.flashRelPtzBox = function (x, y, w, h)
+	{
+		if (box.is(':visible'))
+			return;
+		showRelPtzBox(x, y, w, h);
+		box.fadeOut(1000);
+	}
+	this.enable3dPositioning = function ()
+	{
+		if (!enabled3dPositioning)
+			self.toggle3dPositioning();
+	}
+	this.disable3dPositioning = function ()
+	{
+		if (enabled3dPositioning)
+			self.toggle3dPositioning();
+	}
+	this.toggle3dPositioning = function ()
+	{
+		enabled3dPositioning = !enabled3dPositioning;
+		self.setToggleButtonState();
+	}
+	this.setToggleButtonState = function (forceTurnedOn)
+	{
+		if (enabled3dPositioning || forceTurnedOn)
+			$("#ptzRelativeToggle").addClass("turnedon");
+		else
+			$("#ptzRelativeToggle").removeClass("turnedon");
+	}
+
+	Initialize();
 }
 ///////////////////////////////////////////////////////////////
 // PtzPresetThumbLoader ///////////////////////////////////////
@@ -5313,358 +5885,347 @@ var ptzPresetThumbLoader = new (function ()
 ///////////////////////////////////////////////////////////////
 // Timeline ///////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
-var timelineAlertImgSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAkAAAAUCAYAAABf2RdVAAABMUlEQVQoz33Rv0uVYRjG8c/z+OYBCXJIGwINysAaGkSIfgxO0j9y/go3cUy3iAdECJxajgXRIiJBbm5C4GCgCZVDS/TT"
-	+ "87rcb74dou9238/Fdd1cTxLUXdPo4WasfmMRS9k5d3C1NR/hdSpOc7gM4z5GGmNsYw8apzHMIsX8Bb1UfG2LbuFGK2oXO82Q666MuxiN3Q9s4HMjqnAJ9zAUu4/4gOm6C75VuB5xDVewgn7UsJYxEw8NHUzgGk7Qq8L+SQimMI8LsV"
-	+ "/Guwov8DJuWsAj/MQzvEpFP6ein4pTXMZc1PIGTwd7ErfdxiEe4+BPT/Etnbilg1VspaL+S4RJPMQmVlPxvZUg110pyhQxxwbIuIgHWMPbdkxbNIVPWE/FL/8gYxzPUzn/0EEq7OO9/3AGBF9Ja3vb+5oAAAAASUVORK5CYII=";
-var reduceTimeline = true;
-var timelineThrottleRate = 1000 / 240; // 240 FPS throttle rate.  As a future improvement, this could be made to auto-adjust based on measured timeline rendering speed. E.g. throttle it for 50% CPU usage... a.k.a. one draw per every (avg render ms * 2) ms.
+var timelineDeveloperMode = false;
+/**
+	A value that is added to the zoomScaler when requesting timeline data, to affect precision.
+	+2 for 0.25x precision
+	+1 for 0.5x precision
+	-1 for 2x precision
+	-2 for 4x precision
+ */
+var timelineDataZoomMultiplier = 0;
+var timelineAlertImgSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAYCAMAAADNlS1EAAABd1BMVEVHcEwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	+ "FAQAAAAAAAAAAAAADAAAAAAAAAAAAAAAUAwA1DQAZBAANAgAKAQAMAQAAAAAAAAAAAAAJAQBmIQAqCQBVGgD/XwD8XgD9XgBhHwD7XQD6XQD4XADRTACPMgB7KgBpIgDSTAD+XwAAAADO"
+	+ "SwBiHwDuWAD2WwA5DwC9RABbHQDNSwBPGAD+XgDxWQD0WwCvPgDjVAD1WwCZNQDZTwBEEwAyDABvJQAuCwDpVgB+KwCXNQBXGwDRTQB1JwD3XABwJQB4KABtJABoIgDWTgBBEgDhUwDTT"
+	+ "QCyQABzJgDtWADkVAAhBgDgUwDeUgDdUQBdHQDaUACbNgDLSgAgBQDXTwBRGABxJgAOAgDMSgDJSQBaHADGSADERwD5XABVGgBUGgDsVwBsIwBrIwBmIQCkOgBjIACeOAA8EADKSQDbUA"
+	+ "BcHQCdNwDARQCQMgDqVwCjOgC/RQB9KgCZkaUQAAAAIHRSTlMAId69+SfYBsM8QvnwOdz5twWa/f7++fn5Y77k2P7+/ou/Tl8AAAEdSURBVBjTXdHVcsMwEAVQyZHsxA6VuVUMcZiTclN"
+	+ "mZmZm5o+vrJkkcu/jmZXu7CwA5UiyUDdeK2LARXI568Njwzak1hieGEUOaDPfzEa0KMgSb8rkZnq3gRukhqa3Ymvb3KBlQzuqvrxeqbEsMqCS1RXUDDmbm1dJbC/T0oSlsiWXAoT0heJI"
+	+ "cMgYSsy0KDXS1a8t7PsE0Q8BdKC3hGWks3vkIPv+20HLsJjL66QU1fj6Zvj5mpoKlDT4U2DYfjgb6kn0Bpl9FKztoV8Uve6awcgitcuLa+R00XaIsafaHT9KEWKcXzFjqfJ4jx8MYpyeV"
+	+ "QzQj59Nop/keKOHuL3R8xpvdAHlKW0+2oy+zryY93ajmMze/TOAW9s0hbM/fBwr4p3w8DUAAAAASUVORK5CYII=";
+var timelineFlagImgSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABcAAAAYCAYAAAARfGZ1AAACCElEQVRIx8XUPWgUQRTA8f/M7oYLG+40RxQTkRiQCIJa5EjUJmoh"
+	+ "FiKIhSBELETBSqwESyvBQiutAgmBIILFgaZQUCQgBjniokSMCmdUkBjMfeV2d3bG5oSAnNzmFnztDL+Z98ETQA64JJBpkBhUFXgEHJF0ZDWBIUYIbGFQJeCuDVwcsi6cG3AOWhjDh/CFX"
+	+ "9Djm7aJ3OFhZyydkpk4NtooFsKn0Rs9ZWyHbHrQOWrtdU+iTUS9VBMFPe5kRb/c556iy+qJha+q73xSLzXwywaMxEYKq5GWWJeihUC2DPu6glfLMx898IBJCbFK2jSUCfBqeWbDe19CVm"
+	+ "4Bb2USsDaKJX+eOX9qddl4N4GHgEoE/xkWeV67XftoZiaB+8AagEzi15/9WTw9vQDcAX78OWsbF0LSJbewmd09wMB6s30cyc7UCEPO2e3AdWB/YjhAp5Vh2B0Th6wrB4BrQF9iOEDG7mX"
+	+ "EPW/tkaePNx7olq0k3lp5BFudQUY7r7o7xOgZ4ITd7HKEwjclbN0RK4Nup49+K5ctqmfHmuH1op4rzZRvWA6peKOJ5qv2ysBiM7xQZWmiEE24bGw/LAOv/8Ib0gqQB3Q7TZb/6GLbGy2x"
+	+ "UfwfuNjAVLcWtiYgNGtoo4iMQuEnh0eUF9+Fj6tBpeIqE/A+elIHqkngAugFLgO7GqP3CpgGvrWL/wa9grsEBYmdaQAAAABJRU5ErkJggg==";
+var timelinePersonImgSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA4AAAAYCAYAAADKx8xXAAABx0lEQVQ4y8XUO2sUYRTG8d9eMopxAxEllyUma0QJAZt0lvaChQ"
+	+ "oWYh2s/ASpbERb/QwWaa28xVKwSIwYEBcJbkwwMUbdxZ3s7ljM7GYviRAQfOAwL5zzf58z73tm2FOASygi6opikgvsowKeoTqTE90cE10bFY31iVBNcoVmcbbLMX91VHB7mqlBqnVerHF"
+	+ "/UbBckW93bIIpyKW4MsHFYYJ0nLg8zuImyx8620snu0ygsEtQrVOP9gp2G4SNvY6arhmcxkPcqpGPajK5PjJp1io8WeXxRzZr+nEOK1jPYAizQxmTd6Zkb5wl3086Ffc/0s/MKYKGzNIP"
+	+ "w5jEy9bhXC9IzU4zcix54TZdOMFEjrWy4Pm3uN10M3lmgJNHeyHIphk/TmGg83Bai/2gVj4VRw94WP1HcCeMR+wg/dxlp7oP+LTEwhfKtV5ovcJ8kYWNTjBE6dW28NG7uKhdjYg3m9x7y"
+	+ "0Y9rkWYThZ3USrXOue0fV6/x9BrzKHUckyeByoV18wlcHiYU+0w+Df32Iji6FY96h3HDvBzmffb8Z01P+Cvv1neotK1Yba9/2Ko8GBJsLjF4JHYffUX858Obvlvv8ZmrOB8E/gDEteiey"
+	+ "c1xP8AAAAASUVORK5CYII=";
+var timelineVehicleImgSrc = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAYCAYAAADpnJ2CAAADHklEQVRIx93Vy29VVRQG8N++9/S0tAVLKNa2iFwiNSQaiIQakwZaH"
+	+ "wP/AzVEHDAwDnSs0RiNkUQHxolxgASMkUQZ+pj5JDFWiTFEpS1U24CiwAXSR9rb3nscnF1B0sclztjJyTk556z17e9b316Lm32FZb6l6I73G1kVnI33ugFT9OLlCHoj6yxewuBioGEZsP"
+	+ "0NQe+2VmlTsT6kmSo/TarMZQbx3GKgYSmw1qD3+Xukj2yksYisDi1rfDrOaydUJpcAvR6whAPo27dJ+uIOKlW++pO52vJgaYHdXTQUeOU47/6ugmPYh9+WqtsDGC2lsk8GZJcfk72xXRb"
+	+ "5rXi9vj2P+XhAVkplGI05/zVe8TopX8XWPSXFR+/kzBRvnWBspr4azs5yfwc9bZybYvCSFvTgJM6hGq6VclXQ9/gd0id72Hkrxy8wfPnGLNpzCzvWM/g3h4c5MqYynV2VNol1XIUNT22R"
+	+ "Pns3tzUzW2VrGzvXE0IdpgnUakzO5+a5r4ONraxJpW8Oux2rUUiQYO3qINnVSXcrP5c5cip3594eNq9ZoUXE/fx6hQ9GcuM8EeN2d3LglMaJmhJGCjFVsRhoTsgyhq9wcISjo3kd6zgRa"
+	+ "lku/6ERPhxlfCp/35KQ5BiNCwwDmlCApMBAF+/35zvdtm5Fcrn7Av1dvNefP9/bHkuRsw9RSUlELqFxIXF7Ew9153+FUL9h1jXx4CJxIcdpQ5JEZo0FCpdnuThDW5ozhal5pufrA2xOcg"
+	+ "nJG8WVSn6FqwxDgiqmyjXVd37hx4s8E52a4YfzHB6imq0s6d4ednXm7C7M5Gf4+/OUazkGqgmm8R1GPi9rz0j3bKFjVb7LM5McGlPJlhk5SIt0P7xBOpfRgPIs3/7F15dUMBIxphcYDuM"
+	+ "F7P+mrPfgSelAFxPzHB2VRbCnl+qJKFV5+6PTNhWC0JLw5R8cy8EGY+7hiPWfXtqHLzC2tmC8ORjDED6LxgpLzNRS/GeoOeSxGIu5+q7tpYuNp824K7p3NrKasIKkcVCvXnB8jB2KDbyy"
+	+ "3AAuLBxS1GJgrc6T8X9ib5L1D6qOEQx3D47yAAAAAElFTkSuQmCC";
 function TimelineDataLoader(callbackStartedLoading, callbackGotData, callbackError)
 {
-	var self = this;
-	function GetTimelineData_Ponyfill()
-	{
-		// This ponyfill creates a "timeline" command response without requiring serverside support, subject to some limitations:
-		// 1. Clips created by combining smaller clips will cause the timeline to show video where there is none.
-		// 2. The "All cameras" group must be accessible to the session.
-		function getClips(startdate, enddate, collected)
-		{
-			if (!collected)
-				collected = [];
-			var args = { cmd: "cliplist", camera: "index", view: "all", startdate: startdate, enddate: enddate };
-			return ExecJSONPromise(args)
-				.then(function (response)
-				{
-					if (response.result !== "success")
-						return Promise.reject(args.cmd + ' response did not indicate "success" result: ' + htmlEncode(JSON.stringify(response)));
-					if (typeof response.data !== "undefined") // undefined happens if you request a future date, or perhaps any date with no data.
-					{
-						for (var i = 0; i < response.data.length; i++)
-						{
-							if (collected.length && collected[collected.length - 1].path === response.data[i].path)
-								continue;
-							collected.push(response.data[i]);
-						}
-						if (response.data.length >= 1000)
-						{
-							for (var i = response.data.length - 1; i >= 0 && i >= response.data.length - 200; i--)
-								if (typeof response.data[i].newalerts === "undefined")
-								{
-									enddate = response.data[i].date;
-									return getClips(startdate, enddate, collected);
-								}
-						}
-					}
-					collected.sort(function (a, b) { return a.date - b.date; });
-					return collected;
-				});
-		}
-		function getAlerts(startdate, enddate, collected)
-		{
-			if (!collected)
-				collected = [];
-			var args = { cmd: "alertlist", camera: "index", startdate: startdate, enddate: enddate };
-			return ExecJSONPromise(args)
-				.then(function (response)
-				{
-					if (response.result !== "success")
-						return Promise.reject(args.cmd + ' response did not indicate "success" result: ' + htmlEncode(JSON.stringify(response)));
-					if (typeof response.data !== "undefined") // undefined happens if you request a future date, or perhaps any date with no data.
-					{
-						for (var i = 0; i < response.data.length; i++)
-						{
-							if (collected.length && collected[collected.length - 1].path === response.data[i].path)
-								continue;
-							collected.push(response.data[i]);
-						}
-						if (response.data.length >= 1000)
-						{
-							for (var i = response.data.length - 1; i >= 0 && i >= response.data.length - 200; i--)
-								if (typeof response.data[i].newalerts === "undefined")
-								{
-									enddate = response.data[i].date;
-									return getAlerts(startdate, enddate, collected);
-								}
-						}
-					}
-					collected.sort(function (a, b) { return a.date - b.date; });
-					return collected;
-				});
-		}
-		this.getSimulatedTimelineData = function (startdate, enddate)
-		{
-			var promise_clips = getClips(Math.floor(startdate / 1000), Math.ceil(enddate / 1000));
-			var promise_alerts = getAlerts(Math.floor(startdate / 1000), Math.ceil(enddate / 1000));
-			return Promise.all([promise_clips, promise_alerts])
-				.then(function (result)
-				{
-					var clips = result[0];
-					var alerts = result[1];
-					var response = { result: "success", data: { alerts: [], ranges: [] } };
-
-					// Convert from "cliplist" response format to proposed "timeline" response format.
-					for (var i = 0; i < clips.length; i++)
-					{
-						var src = clips[i];
-						var clip = { cam: src.camera, color: src.color, time: src.date * 1000, len: src.msec };
-						response.data.ranges.push(clip);
-					}
-
-					// Convert from "alertlist" response format to proposed "timeline" response format.
-					for (var i = 0; i < alerts.length; i++)
-					{
-						var src = alerts[i];
-						var alert = { cam: src.camera, time: src.date * 1000 };
-						response.data.alerts.push(alert);
-					}
-
-					return response;
-				});
-		}
-	}
-	var getTimelineData_ponyfill;
-	function GetTimelineData(startdate, enddate)
-	{
-		if (useNativeTimelineCommand)
-		{
-			var args = { cmd: "timeline", start: startdate.getTime(), end: enddate.getTime() };
-			console.log('Requesting ' + Math.round((enddate - startdate) / 86400000) + ' day span at ' + GetTimeStr(new Date()) + ': ' + JSON.stringify(args));
-			return ExecJSONPromise(args);
-		}
-		else
-		{
-			console.log('Requesting ' + Math.round((enddate - startdate) / 86400000) + ' day span at ' + GetTimeStr(new Date()) + ' using simulated timeline data ("cliplist" and "alertlist")');
-			if (!getTimelineData_ponyfill)
-				getTimelineData_ponyfill = new GetTimelineData_Ponyfill();
-			return getTimelineData_ponyfill.getSimulatedTimelineData(startdate, enddate);
-		}
-	}
-	var useNativeTimelineCommand = UrlParameters.Get("timeline") === "2";
-	/** Precise leftmost date currently visible. */
-	var left = GetServerDate(new Date());
-	var startOfLeftDate = new Date(left.getFullYear(), left.getMonth(), left.getDate());
-	/** Precise rightmost date currently visible. */
-	var right = GetServerDate(new Date());
-	/** Object indicating loading status of every day. Keyed on timestamp of midnight of each day. Status 1: loading, 2: loaded, 3: error. */
-	var dayLoadingStatus = {};
+	/** The most recent timeline parameters defining the timeline view we require. */
+	var parameters = { camera: null, left: 0, right: 0, zoomScaler: 0 };
+	/** Specifications of the current timeline dataset. */
+	var loadedState = { camera: null, left: 0, right: 0, zoomScaler: 0, loadedAt: -99999 };
 	/** True if a loading operation is currently active. */
 	var isRunning = false;
-	/** Optionally provides a date visibility update update. */
-	this.Update = function (visibleRange)
+	var refreshTimelineInterval = setInterval(Update, 1001);
+	/** Call to request that new Timeline data be requested if necessary.  Optionally takes a new visible range argument. */
+	this.NewParameters = function (left, right, zoomScaler, camera)
 	{
-		if (visibleRange)
-		{
-			left = new Date(visibleRange.left);
-			startOfLeftDate = new Date(left.getFullYear(), left.getMonth(), left.getDate());
-			right = new Date(visibleRange.right);
-		}
-		if (!isRunning)
-		{
-			var next = getNextDataToLoad();
-			if (next)
+		parameters.camera = camera;
+		parameters.left = left;
+		parameters.right = right;
+		parameters.zoomScaler = zoomScaler;
+		Update();
+	}
+	function Update()
+	{
+		if (documentIsHidden() || currentPrimaryTab !== "timeline")
+			return;
+		if (isRunning || parameters.camera === null)
+			return;
+
+		var reqParams = JSON.parse(JSON.stringify(parameters));
+
+		// Expand left and right borders.  We need to expand by AT LEAST as much as the safety buffer.
+		var safetyMs = GetSafetyBufferMs();
+		var expandBy = safetyMs * 2;
+		reqParams.left -= expandBy;
+		reqParams.right += expandBy;
+
+		var live = GetUtcNow();
+		if (reqParams.left >= live)
+			return;
+		if (reqParams.right > live)
+			reqParams.right = live;
+		if (reqParams.left < 1)
+			reqParams.left = 1;
+		if (reqParams.right < 128000)
+			reqParams.right = 128000;
+
+		if (!RequiresUpdatedView())
+			return;
+
+		isRunning = true;
+		callbackStartedLoading();
+		var requestTime = performance.now();
+		GetTimelineData(reqParams.left, reqParams.right, reqParams.zoomScaler, reqParams.camera)
+			.then(function (response)
 			{
-				isRunning = true;
-				for (var i = 0; i < next.days.length; i++)
-					dayLoadingStatus[next.days[i]] = 1;
-				callbackStartedLoading(next);
-				GetTimelineData(next.start, next.end)
-					.then(function (response)
+				if (response.result !== "success")
+					return Promise.reject(htmlEncode('Server response did not indicate "success" result: ' + JSON.stringify(response)));
+				else
+				{
+					if (timelineDeveloperMode)
+						console.log('<<< Received timeline data in ' + (performance.now() - requestTime).toFixed() + ' ms <<<');
+					loadedState = reqParams;
+					callbackGotData(response.data);
+				}
+			})
+			.catch(function (err)
+			{
+				var errHtml;
+				if (typeof err === "string")
+					errHtml = err;
+				else
+					errHtml = htmlEncode("An unexpected error occurred loading timeline data: " + err);
+				callbackError(errHtml);
+			})
+			.finally(function ()
+			{
+				isRunning = false;
+				Update();
+			});
+	}
+
+	/**
+	 * Returns true if the current timeline parameters warrant downloading a new timeline view.
+	 */
+	function RequiresUpdatedView()
+	{
+		if (parameters.camera === null)
+			return false; // We don't require data yet.
+
+		if (loadedState.camera === null)
+			return true; // We haven't loaded data yet.
+
+		if (parameters.camera !== loadedState.camera)
+			return true; // We need data for a different camera or group.
+
+		if (Math.abs(parameters.zoomScaler - loadedState.zoomScaler) > 0.25)
+			return true; // We need data at a significantly different zoom scale.
+
+		// Boundary checks
+		var safetyMs = GetSafetyBufferMs();
+
+		// Left boundary check
+		var loadToLeft = Math.max(parameters.left - safetyMs, 1);
+		if (loadToLeft < loadedState.left)
+			return true; // New data required to satisfy left boundary requirements.
+
+		// Right boundary check
+		var loadToRight = Math.max(parameters.right + safetyMs, 128000);
+		if (loadToRight > loadedState.right)
+		{
+			// New data is required to satisfy right boundary requirements.
+			// But it is possible that the [live] timestamp falls within our proposed right boundary, in which case it is impossible to load all the data we want.
+			var live = GetUtcNow(); // Current clock time.
+			if (live >= loadToRight)
+				return true; // [live] timestamp does not affect decision. Get new data.
+
+			// [live] timestamp falls within the desired time span.  We still need new data, but for throttling purposes we should only request new data if the current dataset is missing a significant amount of time before [live].
+
+			var msecpp = Math.pow(2, parameters.zoomScaler); // Milliseconds per pixel at the current zoom scale.
+			var significantMs = Math.max(msecpp * 5, 10000); // "Significant" is here defined to be the greater of [5px] or [10s].
+			if (loadedState.right < live - significantMs)
+				return true;
+		}
+		return false;
+	}
+
+	function GetSafetyBufferMs()
+	{
+		var msecpp = Math.pow(2, parameters.zoomScaler); // Milliseconds per pixel at the current zoom scale.
+		var viewportWidthMs = parameters.right - parameters.left;
+		var safetyMs = Math.max(200 * msecpp, viewportWidthMs * 0.25); // Try to always have this much data loaded offscreen when possible. Larger of [200px] or [25% of viewport width].
+		return safetyMs;
+	}
+
+	/**
+	 * Returns a promise that resolves with timeline data that has been converted to the format UI3 wants.
+	 * @param {Number} left leftmost millisecond since epoch
+	 * @param {Number} right rightmost millisecond since epoch
+	 * @param {Number} zoomScaler Zoom scaler
+	 * @param {String} camera Camera short name or group name
+	 */
+	function GetTimelineData(left, right, zoomScaler, camera)
+	{
+		zoomScaler += timelineDataZoomMultiplier;
+		var msecpp = Math.round(Math.pow(2, zoomScaler));
+		var args = { cmd: "timeline", startdate: Math.floor(left / 1000), enddate: Math.ceil(right / 1000), msecpp: msecpp, camera: camera };
+		return ExecJSONPromise(args).then(function (response)
+		{
+			var processed = { colors: [], alerts: [], clips: [] };
+			// A "track" is an index in the colors array. Also specifies draw order.
+			// Processed Format:
+			//  colors: ["#FF0000:"]
+			//  alerts: [{ time: 1000, len: 1000, isFlag: false, tracks: bitmask }] 
+			//  clips: [{ time: 1000, len: 1000, track: 3 }]
+			if (response.data)
+			{
+				var timeOffset = args.startdate * 1000;
+				if (response.data.colors)
+				{
+					for (var i = 0; i < response.data.colors.length; i++)
+						processed.colors.push("#" + BlueIrisColorToCssColor(response.data.colors[i]));
+				}
+				if (response.data.alerts)
+				{
+					for (var i = 0; i < response.data.alerts.length; i++)
 					{
-						if (response.result !== "success")
-							return Promise.reject(htmlEncode('Server response did not indicate "success" result: ' + JSON.stringify(response)));
-						else
-						{
-							for (var i = 0; i < next.days.length; i++)
-								dayLoadingStatus[next.days[i]] = 2;
-							callbackGotData(next, response.data);
-						}
-					})
-					.catch(function (err)
+						var a = response.data.alerts[i];
+						processed.alerts.push({
+							time: timeOffset + (a.x1 * msecpp),
+							len: (a.x2 - a.x1) * msecpp,
+							isFlag: (a.type & BIDBFLAG_FLAGGED) > 0,
+							isPerson: (a.type & BIDBFLAG_AI_PERSON) > 0,
+							isVehicle: (a.type & BIDBFLAG_AI_VEHICLE) > 0,
+							tracks: a.tracks
+						});
+					}
+				}
+				if (response.data.clips)
+				{
+					for (var i = 0; i < response.data.clips.length; i++)
 					{
-						for (var i = 0; i < next.days.length; i++)
-							dayLoadingStatus[next.days[i]] = 3;
-						var errHtml;
-						if (typeof err === "string")
-							errHtml = err;
-						else
-							errHtml = htmlEncode("An unexpected error occurred loading timeline data: " + err);
-						callbackError(next, errHtml);
-						// Wait a moment, then allow these days to be requested again.
-						setTimeout(function ()
-						{
-							for (var i = 0; i < next.days.length; i++)
-								dayLoadingStatus[next.days[i]] = 0;
-						}, 2500);
-					})
-					.finally(function ()
-					{
-						isRunning = false;
-						self.Update();
-					});
+						var c = response.data.clips[i];
+						processed.clips.push({
+							time: timeOffset + (c.x1 * msecpp),
+							len: (c.x2 - c.x1) * msecpp,
+							track: c.track
+						});
+					}
+				}
 			}
-		}
-	}
-	function getNextDataToLoad()
-	{
-		var date = new Date(left.getFullYear(), left.getMonth(), left.getDate());
-		var daysNeedingToLoad = [];
-		var visibleDayCount = 0;
-		while (date < right)
-		{
-			visibleDayCount++;
-			if (!dayLoadingStatus[date.getTime()]) // Days where loading has not started
-				daysNeedingToLoad.push(date.getTime());
-			date.setDate(date.getDate() + 1);
-		}
-		if (daysNeedingToLoad.length === 0)
-			return null;
-
-		// Find the date that needs to load which is closest to now, but preferably earlier than now.
-		var now = GetServerDate(new Date());
-		var idx = binarySearch(daysNeedingToLoad, now.getTime(), NumberCompare);
-		if (idx < 0)
-			idx = (-idx - 1); // Match was approximate. This calculation gets us the closest match index.
-		if (idx >= daysNeedingToLoad.length)
-			idx = daysNeedingToLoad.length - 1;
-		if (daysNeedingToLoad[idx] > now)
-			idx = Math.max(0, idx - 1); // Closest match was in the future.  Go back by one.
-
-		var next = {
-			days: [daysNeedingToLoad[idx]],
-			start: new Date(daysNeedingToLoad[idx]),
-			end: new Date(daysNeedingToLoad[idx])
-		};
-		next.end.setDate(next.end.getDate() + 1);
-
-		// Expand the date range to include adjacent days if needed.
-		var maxDays = Clamp(Math.round(SizeExpansionScaler_A(visibleDayCount)), 1, 365);
-
-		// Check earlier days.
-		date = new Date(next.start.getTime());
-		date.setDate(date.getDate() - 1);
-		while (next.days.length < maxDays && DateNeedsToLoad(date))
-		{
-			next.days.push(date.getTime());
-			next.start = new Date(date.getTime());
-			date.setDate(date.getDate() - 1);
-		}
-		// Check later days.
-		date = new Date(next.end.getTime());
-		while (next.days.length < maxDays && DateNeedsToLoad(date))
-		{
-			next.days.push(date.getTime());
-			date.setDate(date.getDate() + 1);
-			next.end = new Date(date.getTime());
-		}
-		next.days.sort();
-		return next;
-	}
-	function SizeExpansionScaler_A(x)
-	{
-		return 1 + 0.035 * Math.pow(x, 1.25);
-	}
-	function DateNeedsToLoad(date)
-	{
-		if (date < startOfLeftDate || date >= right)
-			return false;
-		return !dayLoadingStatus[date.getTime()];
+			response.data = processed;
+			return response;
+		});
 	}
 }
 function ClipTimeline()
 {
-	// TODO: Periodically refresh the current day. Update existing records.
 	var self = this;
-	var enabled = UrlParameters.Get("timeline") === "1" || UrlParameters.Get("timeline") === "2";
 	var timeline;
 	var initialized = false;
-	var scriptsLoaded = 0; // Development code
-	var dynStyle = null;
-	var alertImg = new Image();
-	var alertImgLoaded = false;
-	var srcdata = { alerts: [], colorMap: {} };
+	var didRunFinishInit = false;
+	var alertImg = new TimelineRasterIcon(timelineAlertImgSrc);
+	var flagImg = new TimelineRasterIcon(timelineFlagImgSrc);
+	var personImg = new TimelineRasterIcon(timelinePersonImgSrc);
+	var vehicleImg = new TimelineRasterIcon(timelineVehicleImgSrc);
 	var $tl_root = $();
 	var timelineDataLoader = null;
+	var minZoomScaler = 8;
+	var maxZoomScaler = 30;
+	var minSavedZoomScaler = 8;
+	var maxSavedZoomScaler = 19;
+	var canvasData = null;
+	/** Number of milliseconds prior to the "live" time that the timeline should not allow to be selected. */
+	this.keepOutTime = 15000; // Blue Iris updates db info every 10s I think, so the absolute minimum age of video should be 10s.
+	var averageCanvasDrawTime = new RollingAverage(30);
+	var averageCanvasCpuUsage = new RollingAverage(30);
+	var canvasDrawFps = new FPSCounter1();
+	var drawRoundedRectangles = true;
+	var timelineStarfieldOffset = 0;
+	var lastTimelineDrawCurrentTime = -1;
 
-	this.getSrcData = function ()
-	{
-		return srcdata;
-	}
+	var starfield = null;
+
 	this.Initialize = function ()
 	{
 		if (initialized)
 			return;
 		initialized = true;
 
-		alertImg.onload = function ()
-		{
-			alertImgLoaded = true;
-			if (timeline && typeof timeline.drawCanvas === "function")
-				timeline.drawCanvas();
-		};
-		alertImg.src = timelineAlertImgSrc;
-		dynStyle = InjectStyleBlock("");
-		BI_CustomEvent.AddListener("FinishedLoading", finishInit);
-		$.getScript('ui3/libs-src/promise.polyfill.min.js?v=' + combined_version + local_bi_session_arg, function () { scriptsLoaded++; finishInit(); });
-		$.getScript('ui3/libs-src/hammer.min.js?v=' + combined_version + local_bi_session_arg, function () { scriptsLoaded++; finishInit(); });
-		$.getScript('ui3/libs-src/vue.js?v=' + combined_version + local_bi_session_arg, function () { scriptsLoaded++; finishInit(); });
+		BI_CustomEvent.AddListener("CameraListLoaded", finishInit);
+		finishInit();
 	}
 	var finishInit = function ()
 	{
-		if (scriptsLoaded < 3)
+		if (didRunFinishInit || !cameraListLoader || !cameraListLoader.GetLastResponse())
 			return;
-		if (!loadingHelper.DidLoadingFinish())
-			return;
+		didRunFinishInit = true;
+		BI_CustomEvent.RemoveListener("CameraListLoaded", finishInit);
 		Vue.component('clip-timeline', {
 			template: ''
 				+ '<div class="clipTimeline" ref="tl_root" :class="clipTimelineClasses">'
-				+ ' <clip-timeline-legend :width="timelineWidth" :timeBase="timeBase" :zoomFactor="zoomFactor" :left="left" :right="right" :currentTime="currentTime" :showSelectedTime="showSelectedTime" />'
-				+ ' <div class="timelineMain">'
-				+ '		<clip-timeline-loader :width="timelineWidth" :timeBase="timeBase" :zoomFactor="zoomFactor" :left="left" :right="right" :currentTime="currentTime" :dayLoadingStatus="dayLoadingStatus" />'
-				+ '		<canvas ref="clipTimelineCanvas" class="clipTimelineCanvas" />'
+				+ ' <clip-timeline-legend :width="timelineWidth" :zoomFactor="zoomFactor" :left="left" :right="right" :currentTime="currentTime" :showSelectedTime="showSelectedTime" />'
+				+ ' <div class="timelineMain" :style="{ width: timelineWidth + \'px\' }">'
+				+ '		<canvas ref="clipTimelineCanvas" class="clipTimelineCanvas" :style="timelineCanvasStyle" />'
 				+ '		<div class="timelineError" v-if="errorHtml" v-html="errorHtml"></div>'
+				+ '	</div>'
+				+ '	<div class="timelineButtonBar">'
+				+ '		<div class="timelineButton icon timelineGoLive" title="Go Live" @click="btnGoLive" :style="goLiveStyle">'
+				+ '			<svg class="icon noflip"><use xlink:href="#svg_mio_clock"></use></svg>'
+				+ '		</div>'
+				+ '		<div class="timelineButton icon" title="Zoom In" @click="btnZoom(-1)">'
+				+ '			<svg class="icon noflip"><use xlink:href="#svg_mio_zoom_in_crop"></use></svg>'
+				+ '		</div>'
+				+ '		<div class="timelineButton icon" title="Zoom Out" @click="btnZoom(1)">'
+				+ '			<svg class="icon noflip"><use xlink:href="#svg_mio_zoom_out_crop"></use></svg>'
+				+ '		</div>'
 				+ '	</div>'
 				+ '	<div class="timelineCenterBar" :style="CenterBarStyle"></div>'
 				+ '</div>',
 			data: function ()
 			{
 				return {
-					/** Object indicating loading status of every day. */
-					dayLoadingStatus: {},
-					/** Array of alert objects.  */
-					//alerts: [],
-					/** Contains arrays of range objects, keyed by the color assigned to them.  Each range object represents a time range that is recorded on video. */
-					//ranges: {},
-					/** Array of colors. These are the keys for the ranges object, in the order they should be drawn.  */
-					colors: [],
 					errorHtml: "",
-					/** Number of milliseconds per pixel. */
-					zoomFactor: 10000,
-					pinchZoomState: { startingZoomFactor: 0 },
-					/** Width of the timeline in pixels. */
+					/** Number that increases linearly to control zoom */
+					zoomScaler: Clamp(parseInt(settings.ui3_timelineZoomScaler), minSavedZoomScaler, maxSavedZoomScaler),
+					pinchZoomState: { startingZoomScaler: 0 },
+					/** Width of the timeline canvas area in pixels. */
 					timelineWidth: 0,
-					/** Height of the timeline in pixels. */
+					/** Height of the timeline canvas area in pixels. */
 					timelineHeight: 0,
-					/** Timestamp of the leftmost object. NOT CURRENTLY USED. */
-					leftmostTime: 0,
-					/** Millisecond timestamp which DOM elements are positioned relative to. */
-					timeBase: Date.now(),
-					/** Millisecond timestamp that is currently selected in the timeline (at the center). */
-					lastSetTime: Date.now(),
-					dragState: { isDragging: false, startX: 0, offsetMs: 0, momentum: 0, accelInterval: null },
+					/** Width of the timeline internal buffer in pixels. Affected by device pixel ratio. */
+					timelineInternalWidth: 0,
+					/** Height of the timeline internal buffer in pixels. Affected by device pixel ratio. */
+					timelineInternalHeight: 0,
+					/** Unbounded millisecond timestamp that the user wants to set the timeline to. For a bounds-clamped value, see currentTime property. */
+					lastSetTime: GetUtcNow(),
+					/** Number that can be incremented to force the component to recompute the currentTime property. */
+					recomputeCurrentTime: 0,
+					dragState: { isMouseDown: false, isDragging: false, startX: 0, lastClickAt: -9999, doubleClickTime: 400 },
+					wheelPanState: { isActive: false, timeout: null },
+					/** Helps maintain a decent timeline frame rate while nothing is interacting with the timeline. */
+					canvasRedrawState: { interval: null, lastRedraw: 0 },
+					/** Helps throttle canvas drawing to once per frame */
+					canvasThrottle: { didDrawAlreadyThisFrame: false, queuedDraw: false },
 					hammerTime: null,
-					acceptZoomThrottled: null,
 					accumulatedZoomDelta: 0,
-					panThrottled: null,
-					/** Counter that is incremented when new range or alert data has been added. Modifying this counter causes the canvas to be redrawn.
-					 * Added because it wasn't behaving reliably when watching the data collections directly for changes. */
-					newDataNotifier: 0,
-					isHovered: true
+					isHovered: true,
+					/** True if the current video stream is live and is playing. */
+					isLive: false,
+					seekPreviewFrameTime: -1,
+					seekPreviewLoading: false,
+					/** True if the timeline is currently responsible for the video player being paused. */
+					timelineDidPauseVideo: false
 				};
 			},
 			created: function ()
 			{
 				timeline = this;
-				BI_CustomEvent.AddListener("afterResize", this.AfterResize);
 				timelineDataLoader = new TimelineDataLoader(this.callbackStartedLoading, this.callbackGotData, this.callbackError);
+				loadingHelper.SetLoadedStatus("timeline");
+				if (startupTimelineMs !== null)
+				{
+					skipLoadingAllVideoStreams = false;
+					this.assignLastSetTime(startupTimelineMs);
+					this.userDidSetTime();
+				}
 			},
 			mounted: function ()
 			{
@@ -5680,13 +6241,27 @@ function ClipTimeline()
 				BindEventsPassive(document, "touchcancel", timeline.touchCancel);
 				BindEventsPassive(timeline.$refs.tl_root, "mouseleave", timeline.mouseLeave);
 				BindEvents(timeline.$refs.tl_root, "wheel", timeline.mouseWheel);
-				timeline.AfterResize();
+				BI_CustomEvent.AddListener("afterResize", this.AfterResize);
+				BI_CustomEvent.AddListener("OpenVideo", this.onOpenVideo);
+				BI_CustomEvent.AddListener("Playback_Play", this.onVideoPlay);
+				BI_CustomEvent.AddListener("Playback_Pause", this.onVideoPause);
+				BI_CustomEvent.AddListener("TabLoaded_timeline", this.drawCanvas);
+				BI_CustomEvent.AddListener("ImageRendered", this.FrameRendered);
+				this.AfterResize();
+				this.onOpenVideo();
+				this.canvasRedrawState.interval = setInterval(this.canvasRedraw, 66);
 			},
 			beforeDestroy: function ()
 			{
+				clearInterval(this.canvasRedrawState.interval);
 				timeline.hammertime.off('pinchstart pinchmove');
 				timeline.hammertime.get('pinch').set({ enable: false });
 				BI_CustomEvent.RemoveListener("afterResize", timeline.AfterResize);
+				BI_CustomEvent.RemoveListener("OpenVideo", this.onOpenVideo);
+				BI_CustomEvent.RemoveListener("Playback_Play", this.onVideoPlay);
+				BI_CustomEvent.RemoveListener("Playback_Pause", this.onVideoPause);
+				BI_CustomEvent.RemoveListener("TabLoaded_timeline", this.drawCanvas);
+				BI_CustomEvent.RemoveListener("ImageRendered", this.FrameRendered);
 				timeline.$refs.tl_root.removeEventListener("touchstart", timeline.mouseDown);
 				timeline.$refs.tl_root.removeEventListener("mousedown", timeline.mouseDown);
 				document.removeEventListener("touchmove", timeline.mouseMove);
@@ -5700,198 +6275,55 @@ function ClipTimeline()
 			},
 			methods:
 			{
-				LoadTimelineData: function (date)
+				newTimelineParameters: function ()
 				{
-					if (!date)
-						date = new Date();
-					var startdate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-					var dayId = startdate.getTime();
-					if (timeline.dayLoadingStatus[dayId] > 0)
-						return;
-					var enddate = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-					Vue.set(timeline.dayLoadingStatus, dayId, 1);
-					GetTimelineData(startdate.getTime() / 1000, enddate.getTime() / 1000)
+					timelineDataLoader.NewParameters(this.visibleRange.left, this.visibleRange.right, this.zoomScaler, videoPlayer.Loading().cam.optionValue);
 				},
 				/**
-				 * Called when data begins loading for a set of days.
-				 * @param {Object} requestInfo Object containing days, start, end.
+				 * Called when data begins loading for the current timeline view.
 				 */
-				callbackStartedLoading: function (requestInfo)
+				callbackStartedLoading: function ()
 				{
-					for (var i = 0; i < requestInfo.days.length; i++)
-						Vue.set(timeline.dayLoadingStatus, requestInfo.days[i], 1);
 				},
 				/**
-				 * Called when data is received for a set of days.
-				 * @param {Object} requestInfo Object containing days, start, end.
+				 * Called when data is received for the current timeline view.
 				 * @param {Object} data Data from the server.
 				 */
-				callbackGotData: function (requestInfo, data)
+				callbackGotData: function (data)
 				{
-					timeline.errorHtml = "";
-
-					for (var i = 0; i < requestInfo.days.length; i++)
-						Vue.set(timeline.dayLoadingStatus, requestInfo.days[i], 2);
+					this.errorHtml = "";
 
 					if (typeof data === "undefined")
 						return; // (unconfirmed with live API) This may happen if you request a future date, or perhaps any date with no data.
 
-					var start = requestInfo.start.getTime();
-					var end = requestInfo.end.getTime();
-
-					// Ingest ranges array
-					var ranges = data.ranges;
-					for (var i = 0; i < ranges.length; i++)
-						timeline.AddRange(ranges[i], start, end, requestInfo.days);
-
-					// Ingest alerts array
-					var alerts = data.alerts;
-					for (var i = 0; i < alerts.length; i++)
-						timeline.AddAlert(alerts[i], start, end, requestInfo.days);
-					timeline.FinalizeAfterAddingAlerts();
-
-					timeline.newDataNotifier++;
-					//for (var i = 0; i < requestInfo.days.length; i++)
-					//{
-					//	var date = new Date(requestInfo.days[i]);
-					//	console.log("Added date: " + date.getFullYear() + "/" + (date.getMonth() + 1) + "/" + date.getDate());
-					//}
+					canvasData = data;
+					this.drawCanvas();
 				},
 				/**
-				 * Called when an error occurs when loading data for a set of days.
-				 * @param {Object} requestInfo Object containing days, start, end.
+				 * Called when an error occurs when loading data for the current timeline view.
 				 * @param {String} errHtml HTML error message.
 				 */
-				callbackError: function (requestInfo, errHtml)
+				callbackError: function (errHtml)
 				{
-					for (var i = 0; i < requestInfo.days.length; i++)
-						Vue.set(timeline.dayLoadingStatus, requestInfo.days[i], 3);
 					timeline.errorHtml = errHtml;
 					console.error(htmlDecode(errHtml));
-				},
-				/**
-				 * 
-				 * @param {any} range A range object.
-				 * @param {any} start Point in time marking the start of the requested time range.
-				 * @param {any} end Point in time marking the end of the requested time range.
-				 * @param {Array} cutpoints Array of timestamps marking the start of new days within the requested time range.  Ranges that span any of these cutpoints must be split into multiple ranges.
-				 */
-				AddRange: function (range, start, end, cutpoints)
-				{
-					range.color = BlueIrisColorToCssColor(range.color);
-
-					// Bounds check.  Any range that starts before the requested time range should be truncated.  The truncated portion will be added later if we load the previous time range.
-					if (range.time < start)
-					{
-						var diff = start - range.time;
-						range.time = start;
-						range.len -= diff;
-						if (range.len <= 0)
-							return;
-					}
-					// Bounds check.  Any range that ends after the requested time range should be truncated.  The truncated portion will be added later if we load the next time range.
-					if (range.time + range.len > end)
-					{
-						var diff = (range.time + range.len) - end;
-						range.len -= diff;
-						if (range.len <= 0)
-							return;
-					}
-					// If the range spans a cutpoint timestamp, we should cut it into multiple ranges and add each of them separately.
-					for (var i = 1; i < cutpoints.length; i++) // Begin loop at index 1 because the 0th cutpoint is equal to [start].
-					{
-						var cut = cutpoints[i];
-						if (range.time < cut && range.time + range.len > cut)
-						{
-							//console.log("Range ", range, "spans cutpoint " + GetDateDisplayStrShort(new Date(cut)));
-							// This range spans the cutpoint. Make a copy that goes up to the cutpoint, and add the copy separately to our source data.
-							var copy = JSON.parse(JSON.stringify(range));
-							copy.len = cut - copy.time;
-							this.AddRangeInternal(copy);
-
-							// Truncate original range.
-							range.time = cut;
-							range.len -= copy.len;
-						}
-					}
-					this.AddRangeInternal(range);
-				},
-				AddRangeInternal: function (range)
-				{
-					// This timeline is designed to handle 100,000+ records efficiently.
-					// Ranges are organized under several levels of structure to provide a balance between loading speed and reading speed.
-					// srcdata.colorMap = {}				(keyed on color hex)
-					//	-> map_of_cameras_to_days = {}		(keyed on camera short name)
-					//		-> rangeChunkCollection = []	(contains day-sized chunks of time ranges, sorted by timestamp of the day)
-					//			-> chunk = []				(contains time ranges confined to the bounds of one day)
-					//				-> range
-					var map_of_cameras_to_days = srcdata.colorMap[range.color];
-					if (!map_of_cameras_to_days)
-					{
-						timeline.colors.push(range.color);
-						timeline.colors.sort();
-						srcdata.colorMap[range.color] = map_of_cameras_to_days = {};
-					}
-
-					var rangeChunkCollection = map_of_cameras_to_days[range.cam];
-					if (!rangeChunkCollection)
-						map_of_cameras_to_days[range.cam] = rangeChunkCollection = [];
-
-					var preciseDate = new Date(range.time);
-					var date = new Date(preciseDate.getFullYear(), preciseDate.getMonth(), preciseDate.getDate());
-					var day = date.getTime();
-					var chunkIdx = binarySearch(rangeChunkCollection, { ts: day }, CompareRangeChunks);
-					if (chunkIdx < 0)
-					{
-						chunkIdx = -chunkIdx - 1;
-						rangeChunkCollection.splice(chunkIdx, 0, new RangeChunk(day));
-					}
-					var chunk = rangeChunkCollection[chunkIdx];
-
-					var ranges = chunk.ranges;
-					if (!ranges.length)
-						ranges.push(range); // First range in this array.
-					else
-					{
-						var last = ranges[ranges.length - 1];
-						if (last.time < range.time) // Normal case. New range goes on end of array. Sort order is maintained.
-							ranges.push(range);
-						else if (last.time > range.time) // New range is out of order! We try not to let this happen.
-						{
-							var idx = binarySearch(ranges, range, RangeCompare);
-							if (idx < 0)
-								idx = -idx - 1; // Match was approximate. This calculation gets us the closest match index.
-							if (idx >= ranges.length)
-								idx = ranges.length - 1;
-							if (ranges[idx].time < range.time)
-								idx++;
-							console.log("Slow operation warning: Timeline item was added out of order at index " + idx + " out of " + ranges.length, last, range, chunk);
-							ranges.splice(idx, 0, range);
-						}
-						else // New range has same exact time as last added range. Update last added range len field.
-							last.len = range.len;
-					}
-				},
-				AddAlert: function (alert)
-				{
-					srcdata.alerts.push(alert.time);
-				},
-				FinalizeAfterAddingAlerts: function ()
-				{
-					srcdata.alerts.sort(function (a, b) { return a - b; });
-
-					//var firstRange = srcdata.colorMap.length ? srcdata.colorMap[0].time : Date.now();
-					//var firstAlert = srcdata.alerts.length ? srcdata.alerts[0] : Date.now();
-					//timeline.leftmostTime = Math.min(firstRange, firstAlert);
 				},
 				AfterResize: function ()
 				{
 					if (this.$refs.tl_root)
 					{
 						var o = $tl_root.offset();
-						this.$refs.tl_root.savedBounds = { x: o ? o.left : 0, y: o ? o.top : 0, w: this.$refs.tl_root.offsetWidth, h: this.$refs.tl_root.offsetHeight };
-						this.timelineWidth = this.$refs.tl_root.savedBounds.w;
-						this.timelineHeight = this.$refs.tl_root.savedBounds.h;
+						this.$refs.tl_root.savedBounds = {
+							x: o ? o.left : 0,
+							y: o ? o.top : 0,
+							w: this.$refs.tl_root.offsetWidth - 36,// -36 for the button bar on the right side.  Subtracted here so the panning handler doesn't activate in the right margin area.
+							h: this.$refs.tl_root.offsetHeight
+						};
+						var dpr = BI_GetDevicePixelRatio();
+						this.timelineInternalWidth = Math.ceil(Math.max(0, this.$refs.tl_root.savedBounds.w) * dpr);
+						this.timelineInternalHeight = Math.ceil(Math.max(0, this.$refs.tl_root.savedBounds.h - 16) * dpr); // -16 for the top bar containing labels
+						this.timelineWidth = this.timelineInternalWidth / dpr;
+						this.timelineHeight = this.timelineInternalHeight / dpr;
 					}
 				},
 				mouseDown: function (e)
@@ -5901,37 +6333,36 @@ function ClipTimeline()
 						return;
 					if (touchEvents.isMultiTouch(e))
 					{
-						timeline.dragState.isDragging = false;
+						this.mouseUp(e);
 						return;
 					}
-					timeline.dragState.startX = e.mouseX;
-					timeline.dragState.offsetMs = 0;
-					timeline.dragState.momentum = 0;
-					timeline.dragState.isDragging = true;
-					//clearInterval(timeline.dragState.accelInterval);
-					//if (touchEvents.isTouchEvent(e))
-					//	timeline.dragState.accelInterval = setInterval(timeline.handlePanAccel, 33);
-					//else
-					//	timeline.dragState.accelInterval = null;
+					if (e.button === 2)
+						return;
+					if (pointInsideElement($tl_root, e.mouseX, e.mouseY))
+					{
+						timeline.dragState.startX = e.mouseX;
+						timeline.dragState.isMouseDown = true;
+						timeline.dragState.isDragging = false;
+						timeline.timelineDidPauseVideo = !videoPlayer.Playback_IsPaused();
+					}
 				},
 				mouseMove: function (e)
 				{
 					mouseCoordFixer.fix(e);
 					if (touchEvents.Gate(e))
 						return;
-					if (timeline.dragState.isDragging)
+					if (timeline.dragState.isMouseDown)
 					{
-						if (touchEvents.isMultiTouch(e))
-						{
-							timeline.dragState.isDragging = false;
-							return;
-						}
 						var delta = (e.mouseX - timeline.dragState.startX);
-						if ((delta < 0 && timeline.dragState.momentum > 0) ||
-							(delta > 0 && timeline.dragState.momentum < 0))
-							timeline.dragState.momentum = 0;
-						timeline.dragState.momentum += delta;
-						timeline.pan(delta * -timeline.zoomFactor);
+						if (Math.abs(delta) > 3)
+							timeline.dragState.isDragging = true;
+						if (timeline.dragState.isDragging)
+						{
+							timeline.dragState.startX = e.mouseX;
+							var time = timeline.lastSetTime + delta * -timeline.zoomFactor;
+							timeline.lastSetTime = time;
+						}
+						this.finishWheelPan();
 					}
 					this.isHovered = !touchEvents.isTouchEvent(e) && pointInsideElement($tl_root, e.mouseX, e.mouseY);
 				},
@@ -5940,16 +6371,26 @@ function ClipTimeline()
 					mouseCoordFixer.fix(e);
 					if (touchEvents.Gate(e))
 						return;
-					if (touchEvents.isMultiTouch(e))
+					if (timeline.dragState.isMouseDown)
 					{
-						timeline.dragState.isDragging = false;
-						return;
-					}
-					if (timeline.dragState.isDragging)
-					{
-						timeline.mouseMove(e);
-						timeline.lastSetTime += (e.mouseX - timeline.dragState.startX) * -timeline.zoomFactor;
-						timeline.dragState.isDragging = false;
+						var isMultiTouch = touchEvents.isMultiTouch(e);
+						if (!isMultiTouch)
+							timeline.mouseMove(e);
+						if (timeline.dragState.isDragging || isMultiTouch)
+							timeline.userDidSetTime();
+						else
+						{
+							var now = performance.now();
+							if (now - timeline.dragState.lastClickAt > timeline.dragState.doubleClickTime)
+							{
+								timeline.dragState.lastClickAt = now;
+								var time = timeline.left + pointToElementRelative($tl_root, e.mouseX, 0).x * timeline.zoomFactor;
+								timeline.assignLastSetTime(time);
+								timeline.userDidSetTime();
+							}
+						}
+						// Order of setting timelineDidPauseVideo is important. userDidSetTime reads it and expects it to be unmodified
+						timeline.timelineDidPauseVideo = timeline.dragState.isMouseDown = timeline.dragState.isDragging = false;
 					}
 					this.isHovered = !touchEvents.isTouchEvent(e) && pointInsideElement($tl_root, e.mouseX, e.mouseY);
 				},
@@ -5958,8 +6399,8 @@ function ClipTimeline()
 					mouseCoordFixer.fix(e);
 					if (touchEvents.Gate(e))
 						return;
-					if (timeline.dragState.isDragging)
-						timeline.dragState.isDragging = false;
+					if (timeline.dragState.isMouseDown)
+						timeline.timelineDidPauseVideo = timeline.dragState.isMouseDown = timeline.dragState.isDragging = false;
 				},
 				mouseLeave: function (e)
 				{
@@ -5968,233 +6409,444 @@ function ClipTimeline()
 				mouseWheel: function (e)
 				{
 					e.preventDefault();
-					var dy = e.deltaY;
-					if (e.deltaMode === 1)
-						dy *= 33.333;
-					else if (e.deltaMode === 2)
-						dy *= 100;
-					if (settings.ui3_wheelZoomReverse === "1")
-						dy *= -1;
-					dy = Clamp(dy, -100, 100);
-					timeline.accumulatedZoomDelta += dy;
-					timeline.acceptZoom(null);
+					e = normalizeWheelEvent(e);
+					if (e.pixelX !== 0)
+					{
+						var dx = e.pixelX;
+						if (settings.ui3_wheelZoomReverse === "1")
+							dx *= -1;
+
+						if (!this.wheelPanState.isActive && dx !== 0)
+							this.wheelPanState.isActive = true;
+						if (this.wheelPanState.isActive)
+						{
+							this.lastSetTime += dx * -this.zoomFactor;
+							clearTimeout(this.wheelPanState.timeout);
+							this.wheelPanState.timeout = setTimeout(this.finishWheelPan, 200);
+						}
+					}
+					if (e.spinY !== 0)
+					{
+						var dy = e.spinY / 2;
+						if (settings.ui3_wheelZoomReverse === "1")
+							dy *= -1;
+						this.accumulatedZoomDelta += dy;
+						this.acceptZoom(null);
+						this.finishWheelPan();
+					}
+				},
+				finishWheelPan: function ()
+				{
+					clearTimeout(this.wheelPanState.timeout);
+					if (this.wheelPanState.isActive)
+					{
+						this.wheelPanState.isActive = false;
+						timeline.userDidSetTime();
+					}
 				},
 				onPinchStart: function (e)
 				{
-					timeline.pinchZoomState.startingZoomFactor = timeline.zoomFactor;
+					timeline.pinchZoomState.startingZoomScaler = timeline.zoomScaler;
 				},
 				onPinchMove: function (e)
 				{
-					timeline.acceptZoom(timeline.pinchZoomState.startingZoomFactor / Math.max(0.001, e.scale * e.scale));
+					var szf = Math.pow(2, timeline.pinchZoomState.startingZoomScaler);
+					var speedExponent = 2;
+					var zoomSpeed = Clamp(parseFloat(settings.ui3_wheelAdjustableSpeed), 20, 2000);
+					zoomSpeed /= 400;
+					speedExponent *= zoomSpeed;
+					var zf = szf / Math.max(0.001, Math.pow(e.scale, speedExponent));
+					var zs = Math.log2(zf);
+					timeline.acceptZoom(zs);
 				},
-				handlePanAccel: function ()
+				acceptZoom: function (newZoomScaler)
 				{
-					if (!timeline.dragState.isDragging)
+					if (newZoomScaler)
+						timeline.setZoom_Internal(newZoomScaler);
+					if (timeline.accumulatedZoomDelta !== 0)
 					{
-						if (Math.abs(timeline.dragState.momentum) < 1)
-						{
-							timeline.dragState.momentum = 0;
-							clearInterval(timeline.dragState.accelInterval);
-							timeline.dragState.accelInterval = null;
-						}
-						console.log("Momentum " + timeline.dragState.momentum);
-						timeline.lastSetTime += (timeline.dragState.momentum * -timeline.zoomFactor) / 100;
+						var zoomSpeed = Clamp(parseFloat(settings.ui3_wheelAdjustableSpeed), 20, 2000);
+						zoomSpeed /= 400;
+						var dz = timeline.accumulatedZoomDelta * zoomSpeed;
+						newZoomScaler = timeline.zoomScaler + dz;
+						timeline.accumulatedZoomDelta = 0;
+						timeline.setZoom_Internal(newZoomScaler);
 					}
-					var accel = -100;
-					if (timeline.dragState.momentum < 0)
-						accel *= -1;
-					var newMomentum = timeline.dragState.momentum + accel;
-					if (Math.abs(newMomentum) < accel)
-						newMomentum = 0;
-					timeline.dragState.momentum = newMomentum;
 				},
-				pan: function (arg)
+				setZoom_Internal: function (zoom)
 				{
-					if (!timeline.panThrottled)
-						timeline.panThrottled = throttle(function (offsetMs)
-						{
-							timeline.dragState.offsetMs = offsetMs;
-						}, timelineThrottleRate);
-
-					timeline.panThrottled(arg);
+					this.zoomScaler = Clamp(zoom, minZoomScaler, maxZoomScaler);
+					settings.ui3_timelineZoomScaler = Clamp(zoom, minSavedZoomScaler, maxSavedZoomScaler);
 				},
-				acceptZoom: function (arg)
+				assignLastSetTime: function (time)
 				{
-					if (!timeline.acceptZoomThrottled)
-						timeline.acceptZoomThrottled = throttle(function (newZoomFactor)
-						{
-							if (newZoomFactor)
-								timeline.zoomFactor = Clamp(newZoomFactor, 250, 1000000000);
-							if (timeline.accumulatedZoomDelta !== 0)
-							{
-								var speed = 1 + Clamp(parseFloat(settings.ui3_wheelAdjustableSpeed), 0, 2000);
-								var multiplier = ((timeline.accumulatedZoomDelta / 100) * speed) / 2500;
-								if (multiplier > 0)
-									multiplier *= 1.191043354; // Painstakingly determined to make zooming out very similar in magnitude to zooming in.
-								newZoomFactor = timeline.zoomFactor + (timeline.zoomFactor * multiplier);
-								timeline.accumulatedZoomDelta = 0;
-								timeline.zoomFactor = Clamp(newZoomFactor, 250, 1000000000);
-							}
-						}, timelineThrottleRate);
-
-					timeline.acceptZoomThrottled(arg);
+					if (time < 1)
+						time = 1;
+					else
+					{
+						var serverTime = GetUtcNow();
+						if (time > serverTime - self.keepOutTime)
+							time = serverTime;
+					}
+					this.lastSetTime = time;
 				},
 				drawCanvas: function ()
 				{
-					var canvas = this.$refs.clipTimelineCanvas;
-					if (!canvas)
+					if (this.canvasThrottle.didDrawAlreadyThisFrame)
+					{
+						this.canvasThrottle.queuedDraw = true;
 						return;
-					var ctx = canvas.getContext("2d");
-					ctx.clearRect(0, 0, canvas.width, canvas.height);
-					ctx.fillStyle = "#000000";
-					ctx.fillRect(0, 0, canvas.width, canvas.height);
+					}
+					else
+					{
+						this.canvasThrottle.queuedDraw = false;
+						this.canvasThrottle.didDrawAlreadyThisFrame = true;
+						requestAnimationFrame(this.nextCanvasDrawFrame);
+					}
+					var canvas = this.$refs.clipTimelineCanvas;
+					if (!canvas || currentPrimaryTab !== "timeline")
+						return;
 
+					var perfStart = performance.now();
+					var bet = new BasicEventTimer();
+					bet.start("Draw Background");
+					var ctx = canvas.getContext("2d");
+
+					var dpr = BI_GetDevicePixelRatio();
+					var zoomFactor = this.zoomFactor / dpr;
 					var left = this.left;
 					var right = this.right;
+					var now = GetUtcNow();
+					var showStarfield = settings.ui3_timeline_starfield === "1";
 
-					//var visibleDayTimestamps = [];
-					var leftmostDate = new Date(this.left);
-					leftmostDate = new Date(leftmostDate.getFullYear(), leftmostDate.getMonth(), leftmostDate.getDate());
-					var leftmostDateTs = leftmostDate.getTime();
-					//while (date.getTime() < right)
-					//{
-					//	visibleDayTimestamps.push(date.getTime());
-					//	date.setDate(date.getDate() + 1);
-					//}
+					if (lastTimelineDrawCurrentTime > -1)
+						timelineStarfieldOffset += (this.currentTime - lastTimelineDrawCurrentTime) / zoomFactor;
+					lastTimelineDrawCurrentTime = this.currentTime;
 
-					// Draw alert icons
-					if (alertImgLoaded)
+					if (!showStarfield)
 					{
-						var alertImgScale = alertImg.naturalHeight / 11;
-						var alertImgW = alertImg.naturalWidth / alertImgScale;
-						var alertImgH = alertImg.naturalHeight / alertImgScale;
-						var alertImgXOffset = alertImgW / 2;
-						var alertImgYOffset = 1;
-
-						var nextAllowedX = 0;
-						var x;
-
-						var alerts = srcdata.alerts;
-						for (var i = 0; i < alerts.length; i++)
-						{
-							var alert = alerts[i];
-							if (alert >= left && alert <= right)
-							{
-								x = ((alert - left) / timeline.zoomFactor) - alertImgXOffset;
-								// For speed and legibility, do not draw overlapping icons. 
-								// Also, leave 1 icon width of padding to the right of any drawn 
-								// icon, to achieve spacing similar to the local console.
-								if (x >= nextAllowedX)
-								{
-									nextAllowedX = x + (alertImgW * 2);
-									ctx.drawImage(alertImg, x, alertImgYOffset, alertImgW, alertImgH);
-								}
-							}
-						}
+						ctx.fillStyle = "#000000";
+						ctx.fillRect(0, 0, canvas.width, canvas.height);
+					}
+					else
+					{
+						if (!starfield)
+							starfield = new StarfieldGenerator(80, 0.003, "bp2008");
+						starfield.draw(ctx, 0, 0, canvas.width, canvas.height, timelineStarfieldOffset);
 					}
 
-					// Motion-triggered systems can have hundreds of thousands of time ranges when the timeline is zoomed out.
-					// This is far too much to render efficiently.
-					// We combine close-together ranges so we don't have to draw as many objects.
 
-					var allReducedRanges = {};
-					var perfBeforeReduce = performance.now();
-					for (var ci = 0; ci < this.colors.length; ci++)
+					bet.stop();
+
+					if (canvasData)
 					{
-						var colorKey = this.colors[ci];
-						var map_of_cameras_to_days = srcdata.colorMap[colorKey];
-						var reducedRanges = allReducedRanges[colorKey] = [];
-
-						// We're reducing the dataset by creating an array of true/false buckets.
-						// Each bucket represents a time slot and the bucket is filled (set = true) if the time slot contains any video.
-						var bucketSize = timeline.zoomFactor / 2; // One bucket represents this many milliseconds.
-						var buckets = new Array((timeline.visibleMilliseconds / bucketSize) | 0);
-						for (var cam in map_of_cameras_to_days)
+						if (showStarfield)
 						{
-							var rangeChunkCollection = map_of_cameras_to_days[cam];
-							if (!rangeChunkCollection)
-								continue;
-							for (var chunkIdx = 0; chunkIdx < rangeChunkCollection.length; chunkIdx++)
+							// Draw partially-transparent black overlay behind loadable timeline area.
+							var overlayLeft = Math.max(0, -left / zoomFactor);
+							var overlayWidth = Math.min(canvas.width, (now - (self.keepOutTime * 0.8) - left) / zoomFactor);
+							var stepsFromMaxZoomout = maxZoomScaler - this.zoomScaler;
+							var blackBackgroundOpacity = Clamp(stepsFromMaxZoomout / 10, 0, 0.8) + 0.2;
+							ctx.fillStyle = "rgba(0,0,0," + blackBackgroundOpacity + ")";
+							ctx.fillRect(overlayLeft, 0, overlayWidth, canvas.height);
+						}
+
+						var alertIconSpace = 12 * dpr;
+						var clipDrawRegionHeight = canvas.height - alertIconSpace;
+						var timelineColorbarHeight = clipDrawRegionHeight / canvasData.colors.length;
+
+						bet.start("Draw clips and alerts");
+						// Draw clip rectangles
+						for (var n = 0; n < canvasData.clips.length; n++)
+						{
+							var clip = canvasData.clips[n];
+							var x = (clip.time - left) / zoomFactor;
+							var w = clip.len / zoomFactor;
+							if (x < canvas.width && x + w > 0)
 							{
-								var chunk = rangeChunkCollection[chunkIdx];
-								if (chunk.ts < right && chunk.ts >= leftmostDateTs)
+								var y1 = Math.round(clip.track * timelineColorbarHeight);
+								var y2 = Math.round((clip.track + 1) * timelineColorbarHeight);
+
+								ctx.fillStyle = canvasData.colors[clip.track];
+								if (drawRoundedRectangles)
+									roundRect(ctx, x, alertIconSpace + y1, w, y2 - y1);
+								else
+									ctx.fillRect(x, alertIconSpace + y1, w, y2 - y1);
+							}
+						}
+
+						// Draw alert rectangles
+						ctx.fillStyle = ValidateHexColor(settings.ui3_timeline_alertBarColor, "#8E3510");
+						var y = Math.round(alertIconSpace * 0.125);
+						var h = alertIconSpace - y - y;
+						for (var n = 0; n < canvasData.alerts.length; n++)
+						{
+							var alert = canvasData.alerts[n];
+							var x = (alert.time - left) / zoomFactor;
+							var w = alert.len / zoomFactor;
+							if (x < canvas.width && x + w > 0)
+							{
+								if (drawRoundedRectangles)
+									roundRect(ctx, x, y, w, h);
+								else
+									ctx.fillRect(x, y, w, h);
+							}
+						}
+
+						if (settings.ui3_timeline_alertTrackMarkers === "1")
+						{
+							// Draw alert track markers
+							for (var n = 0; n < canvasData.alerts.length; n++)
+							{
+								var alert = canvasData.alerts[n];
+								var x = (alert.time - left) / zoomFactor;
+								if (x < canvas.width && x >= 0)
 								{
-									var ranges = chunk.ranges;
-									// Set the value = true for every bucket that has some video data.
-									for (var i = 0; i < ranges.length; i++)
+									for (var track = 0; track <= canvasData.colors.length; track++)
 									{
-										var range = ranges[i];
-										if (range.time <= right && range.time + range.len >= left)
+										if ((alert.tracks & (1 << track)) > 0)
 										{
-											var leftOffsetMs = range.time - left;
-											var rightOffsetMs = leftOffsetMs + range.len - 1; // -1 millisecond so we don't accidentally mark a bucket that actually has no video
-											var firstBucketIdx = Clamp((leftOffsetMs / bucketSize) | 0, 0, buckets.length - 1); // Bitwise or with zero is a cheap way to round down, as long as numbers fit in a 32 bit signed int.
-											var lastBucketIdx = Clamp((rightOffsetMs / bucketSize) | 0, 0, buckets.length - 1);
-											for (var n = firstBucketIdx; n <= lastBucketIdx; n++)
-												buckets[n] = true;
+											var y1 = Math.round(track * timelineColorbarHeight);
+											var y2 = Math.round((track + 1) * timelineColorbarHeight);
+											ctx.fillRect(x, alertIconSpace + y1, 1 * dpr, y2 - y1);
 										}
 									}
 								}
 							}
 						}
 
-						// Build an array containing the minimum number of ranges required to draw these buckets.
-						var inBucket = false;
-						var currentRange = { color: colorKey };
-						for (var i = 0; i < buckets.length; i++)
+						// Draw alert icons
+						for (var n = 0; n < canvasData.alerts.length; n++)
 						{
-							if (buckets[i])
-							{
-								if (inBucket)
-									continue;
-								else
-								{
-									currentRange.time = left + (i * bucketSize);
-									inBucket = true;
-								}
-							}
-							else
-							{
-								if (!inBucket)
-									continue;
-								else
-								{
-									currentRange.len = (left + (i * bucketSize)) - currentRange.time;
-									reducedRanges.push(currentRange);
-									currentRange = { color: colorKey };
-									inBucket = false;
-								}
-							}
+							var a = canvasData.alerts[n];
+							var img = alertImg;
+							if (a.isFlag)
+								img = flagImg;
+							else if (a.isPerson)
+								img = personImg;
+							else if (a.isVehicle)
+								img = vehicleImg;
+							img.draw(ctx, canvas.width, dpr, ((a.time - left) / zoomFactor), 0);
 						}
-						if (inBucket)
-						{
-							currentRange.len = (left + (i * bucketSize)) - currentRange.time;
-							reducedRanges.push(currentRange);
-						}
+						bet.stop();
 					}
-					var perfBeforeRender = performance.now();
 
-					for (var ci = 0; ci < this.colors.length; ci++)
+					if (left < 0 && right > 0)
 					{
-						var colorKey = this.colors[ci];
-						var ranges = allReducedRanges[colorKey];
-						for (var i = 0; i < ranges.length; i++)
+						// Left boundary is visible.
+						ctx.fillStyle = "rgba(138,95,62,1)";
+						ctx.fillRect((-left / zoomFactor) - (2 * dpr), 0, 2 * dpr, canvas.height);
+					}
+					if (now > left && now - self.keepOutTime <= right)
+					{
+						bet.start("Draw 'live' time indicator");
+						var x = (now - left - self.keepOutTime) / zoomFactor;
+						var y = 0;
+						var w = self.keepOutTime / zoomFactor;
+						var h = canvas.height;
+						var grd = ctx.createLinearGradient(x, y, x + w, y);
+						grd.addColorStop(0, "rgba(123,133,180,0.0)");
+						grd.addColorStop(0.2, "rgba(123,133,180,0.3)");
+						grd.addColorStop(0.8, "rgba(70,130,255,0.8)");
+						grd.addColorStop(0.9, "rgba(100,255,255,0.9)");
+						grd.addColorStop(1, "rgba(255,255,255,1)");
+						ctx.fillStyle = grd;
+						ctx.fillRect(x, y, w, h);
+						if (zoomFactor > 1200)
 						{
-							var range = ranges[i];
-							ctx.fillStyle = "#" + range.color;
-							var x = ((range.time - left) / timeline.zoomFactor);
-							var y = 12 + (ci * timeline.TimelineColorbarHeight);
-							var w = Math.max(0.5, range.len / timeline.zoomFactor);
-							var h = timeline.TimelineColorbarHeight;
-							ctx.fillRect(x, y, w, h);
+							// We're zoomed out far enough that 15s is getting really small.  Draw a 2px line so the live point remains easily visible.
+							ctx.fillStyle = "rgba(100,255,255,1)";
+							ctx.fillRect(x + w - 1 * dpr, y, 2 * dpr, h);
 						}
+						bet.stop();
+					}
+
+					// Draw a gradient if we've panned beyond a boundary.
+					var outOfBoundsTime = this.lastSetTime;
+					var currentTime = this.currentTime;
+					var futureTimePx = (outOfBoundsTime - currentTime) / zoomFactor;
+					if (futureTimePx > 0)
+					{
+						bet.start("Draw future overscroll gradient");
+						var x = (canvas.width - futureTimePx);
+						var y = 0;
+						var w = futureTimePx;
+						var h = canvas.height;
+						var grd = ctx.createLinearGradient(x, y, x + w, y);
+						grd.addColorStop(0, "rgba(0,0,0,0)");
+						grd.addColorStop(1, "rgba(62,95,138,1)");
+						ctx.fillStyle = grd;
+						ctx.fillRect(x, y, w, h);
+						bet.stop();
+					}
+					var pastTimePx = -outOfBoundsTime / zoomFactor;
+					if (pastTimePx > 0)
+					{
+						bet.start("Draw past overscroll gradient");
+						var x = 0;
+						var y = 0;
+						var w = pastTimePx;
+						var h = canvas.height;
+						var grd = ctx.createLinearGradient(x, y, x + w, y);
+						grd.addColorStop(0, "rgba(138,95,62,1)");
+						grd.addColorStop(1, "rgba(0,0,0,0)");
+						ctx.fillStyle = grd;
+						ctx.fillRect(x, y, w, h);
+						bet.stop();
 					}
 					var perfEnd = performance.now();
-					console.log("Reduce took " + (perfBeforeRender - perfBeforeReduce) + " ms. Render took " + (perfEnd - perfBeforeRender) + " ms.");
+
+					// Decide whether to render curved corners next time.
+					var renderTime = perfEnd - perfStart;
+					averageCanvasDrawTime.Add(renderTime);
+					var fps = canvasDrawFps.getFPS(renderTime);
+					var averageRenderTime = averageCanvasDrawTime.Get();
+					var cpuUsage = (averageRenderTime * fps) / 1000;
+					averageCanvasCpuUsage.Add(cpuUsage);
+					var averageCpuUsage = averageCanvasCpuUsage.Get();
+					if (drawRoundedRectangles && averageCpuUsage > 0.2)
+						drawRoundedRectangles = false;
+					else if (!drawRoundedRectangles && fps >= 30 && averageCpuUsage < 0.05)
+						drawRoundedRectangles = true;
+					if (timelineDeveloperMode)
+						bet.log("Canvas Render: " + renderTime.toFixed(1) + " ms (avg " + averageRenderTime.toFixed(1) + "ms).\nFPS: " + fps.toFixed(0) + ". CPU: " + (cpuUsage * 100).toFixed(1) + "% (avg " + (averageCpuUsage * 100).toFixed(1) + "%)");
+
+					this.canvasRedrawState.lastRedraw = perfStart;
+				},
+				nextCanvasDrawFrame: function ()
+				{
+					this.canvasThrottle.didDrawAlreadyThisFrame = false;
+					if (this.canvasThrottle.queuedDraw)
+						this.drawCanvas();
+				},
+				canvasRedraw: function ()
+				{
+					var now = performance.now();
+					if (now > this.canvasRedrawState.lastRedraw + 50)
+					{
+						var live = GetUtcNow();
+						if (this.left < live && this.right > live - self.keepOutTime)
+							this.recomputeCurrentTime++;
+					}
+				},
+				FrameRendered: function (data)
+				{
+					if (typeof data.utc !== "number" || this.dragState.isMouseDown || this.timelineIsBeingPanned || (data.isSeekPreview && !data.isTimelineJump))
+						return;
+
+					if (videoPlayer.Loaded().image.isTimeline())
+					{
+						var serverTime = GetUtcNow();
+						if (data.utc > serverTime - self.keepOutTime)
+						{
+							console.log("Timeline video frame (" + GetDateStr(new Date(data.utc), true) + ") rendered after the start of the keep-out zone (" + GetDateStr(new Date(serverTime - self.keepOutTime), true) + "). Going to live view.");
+							videoPlayer.goLive();
+						}
+					}
+					this.lastSetTime = data.utc;
+
+					if (this.timelineDidPauseVideo && !videoPlayer.Playback_IsPaused())
+						videoPlayer.Playback_Pause();
+				},
+				btnGoLive: function ()
+				{
+					videoPlayer.goLive();
+				},
+				btnZoom: function (direction)
+				{
+					this.acceptZoom(this.zoomScaler + (direction > 0 ? 1 : -1));
+				},
+				onOpenVideo: function ()
+				{
+					this.isLive = videoPlayer.Loading().image.isLive;
+					this.newTimelineParameters();
+				},
+				onVideoPlay: function ()
+				{
+					this.isLive = videoPlayer.Loading().image.isLive;
+				},
+				onVideoPause: function ()
+				{
+					this.isLive = false;
+				},
+				userDidSetTime: function ()
+				{
+					this.assignLastSetTime(this.lastSetTime);
+					videoPlayer.LoadLiveCamera(videoPlayer.Loading().cam, this.getCurrentTimelineArgs());
+				},
+				getCurrentTimelineArgs: function ()
+				{
+					return { timelineMs: this.currentTime, startPaused: videoPlayer.Playback_IsPaused() && !this.timelineDidPauseVideo };
+				},
+				updateSeekPreview: function ()
+				{
+					timelineSync.run(this, function ()
+					{
+						if (!this.timelineIsBeingPanned || this.seekPreviewLoading)
+						{
+							timelineSync.unlock();
+							return;
+						}
+
+						var requestMs = clipTimeline.BoundsCheckTimelineMs(this.currentTime);
+						if (!requestMs || this.seekPreviewFrameTime === requestMs)
+						{
+							timelineSync.unlock();
+							return;
+						}
+
+						this.downloadSeekPreview(requestMs);
+					});
+				},
+				/** Call to download and render a seek preview frame. You must already have obtained a timelineSync lock. The request will be aborted if a fetch video stream is currently pending. */
+				downloadSeekPreview: function (requestMs, jumpArg)
+				{
+					if (safeFetch.IsActive())
+					{
+						timelineSync.unlock();
+						return;
+					}
+					if (!jumpArg)
+						jumpArg = "";
+					var loadingImg = videoPlayer.Loading().image;
+					var qualityArgs = genericQualityHelper.getSeekPreviewQualityArgs(loadingImg);
+					var groupArgs = groupCfg.GetUrlArgs(loadingImg);
+					var overlayArgs = clipOverlayCfg.GetUrlArgs("*ui3_timeline_pseudocam");
+					var seekImgUrl = currentServer.remoteBaseURL + "time/" + loadingImg.path + '?jpeg&speed=0&pos=' + Math.floor(requestMs) + jumpArg + currentServer.GetAPISessionArg("&", true) + '&opaque=' + ui3InstanceId + qualityArgs + groupArgs + overlayArgs;
+					var uniqueId = loadingImg.uniqueId;
+					var startTime = performance.now();
+					this.seekPreviewLoading = true;
+
+					videoOverlayHelper.ShowLoadingOverlay(true, true);
+					DownloadToDataUri(seekImgUrl)
+						.then(function (result)
+						{
+							if (videoPlayer.Loading().image.uniqueId !== uniqueId)
+								return;
+							var frameUtc = parseInt(result.headers["x-utc"]);
+							jpegPreviewModule.RenderDataURI(startTime, uniqueId, result.dataUri, frameUtc, result.headers, !!jumpArg);
+						})
+						.catch(function (err)
+						{
+							if (videoPlayer.Loading().image.uniqueId !== uniqueId)
+								return;
+							videoOverlayHelper.HideLoadingOverlay();
+						})
+						.finally(function ()
+						{
+							timeline.seekPreviewFrameTime = requestMs;
+							timeline.seekPreviewLoading = false;
+							timelineSync.unlock();
+						});
 				}
 			},
 			computed:
 			{
+				/** Number of milliseconds per pixel. */
+				zoomFactor: function ()
+				{
+					return Math.pow(2, this.zoomScaler);
+				},
 				/** Number of milliseconds across the visible area of the timeline. */
 				visibleMilliseconds: function ()
 				{
@@ -6218,10 +6870,6 @@ function ClipTimeline()
 						right: this.right,
 					};
 				},
-				TimelineColorbarHeight: function ()
-				{
-					return (80 / this.colors.length);
-				},
 				CenterBarCenterX: function ()
 				{
 					return this.timelineWidth / 2;
@@ -6232,20 +6880,17 @@ function ClipTimeline()
 						left: (this.CenterBarCenterX - 1) + 'px'
 					};
 				},
-				timelineContentLeft: function ()
-				{
-					// Compute the left offset which the timeline must have so our center line is rendered at the time indicated by [currentTime].
-					var msLeftOfCurrent = (this.currentTime - this.timeBase);
-					var pxLeftOfCurrent = (msLeftOfCurrent / this.zoomFactor) - this.CenterBarCenterX;
-					return -pxLeftOfCurrent;
-				},
+				/** Currently highlighted time */
 				currentTime: function ()
 				{
+					if (this.recomputeCurrentTime) { } // Reactively update currentTime when recomputeCurrentTime value changes
+
 					var time = this.lastSetTime;
-					if (this.dragState.isDragging)
-					{
-						time += this.dragState.offsetMs;
-					}
+					if (time < 1)
+						time = 1;
+					var serverTime = GetUtcNow();
+					if (time > serverTime)
+						time = serverTime;
 					return time;
 				},
 				clipTimelineClasses: function ()
@@ -6258,57 +6903,66 @@ function ClipTimeline()
 				showSelectedTime: function ()
 				{
 					return this.dragState.isDragging || this.isHovered;
+				},
+				timelineInternalSize: function ()
+				{
+					return { w: this.timelineInternalWidth, h: this.timelineInternalHeight };
+				},
+				timelineCanvasStyle: function ()
+				{
+					return { width: this.timelineWidth + "px", height: this.timelineHeight + "px" };
+				},
+				goLiveStyle: function ()
+				{
+					return { color: this.isLive ? '#71E068' : '' };
+				},
+				timelineIsBeingPanned: function ()
+				{
+					return this.dragState.isDragging || this.wheelPanState.isActive || this.seekPreviewLoading;
 				}
 			},
 			watch:
 			{
 				zoomFactor: function ()
 				{
-					this.timeBase = this.currentTime;
-					this.drawCanvas();
+					this.newTimelineParameters();
 				},
 				visibleRange: function ()
 				{
-					timelineDataLoader.Update(this.visibleRange);
+					this.newTimelineParameters();
+					this.drawCanvas();
 				},
-				timelineContentLeft: function ()
-				{
-					// Having vue manipulate the DOM to scroll the timeline causes a bunch of extra layout work we can avoid by doing it this way instead:
-					dynStyle(".timelineContent { transform: translate(" + this.timelineContentLeft + "px); }");
-				},
-				timelineWidth: function ()
+				timelineInternalSize: function ()
 				{
 					var canvas = this.$refs.clipTimelineCanvas;
 					if (!canvas)
 						return;
-					canvas.width = this.timelineWidth;
-					canvas.height = this.timelineHeight;
+					canvas.width = this.timelineInternalWidth;
+					canvas.height = this.timelineInternalHeight;
 					this.drawCanvas();
 				},
-				timelineHeight: function ()
+				seekPreviewFrameTime: function ()
 				{
-					var canvas = this.$refs.clipTimelineCanvas;
-					if (!canvas)
-						return;
-					canvas.width = this.timelineWidth;
-					canvas.height = this.timelineHeight;
-					this.drawCanvas();
-				},
-				newDataNotifier: function ()
-				{
-					this.drawCanvas();
+					this.updateSeekPreview();
 				},
 				currentTime: function ()
 				{
-					this.drawCanvas();
+					this.updateSeekPreview();
+				},
+				timelineDidPauseVideo: function (newValue, oldValue)
+				{
+					if (newValue && !videoPlayer.Playback_IsPaused())
+						videoPlayer.Playback_Pause();
+					else if (oldValue && !newValue && videoPlayer.Playback_IsPaused())
+						videoPlayer.Playback_Play();
 				}
 			}
 		});
 
 		Vue.component('clip-timeline-legend', {
 			template: ''
-				+ '<div class="timelineLegendBar">'
-				+ '	<div class="timelineLegend timelineContent">'
+				+ '<div class="timelineLegendBar" :style="{ width: width + \'px\' }">'
+				+ '	<div class="timelineLegend">'
 				+ '		<div class="timelineLabel" v-for="tag in tags" :key="tag.time" :style="tag.style" :class="{ timelineLabelMinor: tag.minor }">{{tag.label}}</div>'
 				+ '	</div>'
 				+ '	<div class="timelineCurrentTimeWrapper" v-show="showSelectedTime"><div class="timelineCurrentTime">{{currentTimeStr}}</div></div>'
@@ -6322,8 +6976,6 @@ function ClipTimeline()
 			{
 				/** Width of timeline in pixels */
 				width: Number,
-				/** Millisecond timestamp which DOM elements are positioned relative to. */
-				timeBase: Number,
 				/** Number of milliseconds per pixel. */
 				zoomFactor: Number,
 				/** Timestamp of the left edge */
@@ -6346,6 +6998,7 @@ function ClipTimeline()
 			},
 			methods:
 			{
+				/** Returns an array of visible times with precision smaller than 1 day. */
 				generateTickMarks: function ()
 				{
 					/** The number of hours we must skip between tags in order to fit 45px tags together tightly */
@@ -6367,19 +7020,24 @@ function ClipTimeline()
 						minuteInterval = 30;
 					else
 						minuteInterval = 0;
+					var left = GetServerDate(new Date(this.left)).getTime();
+					var right = GetServerDate(new Date(this.right)).getTime();
 					var times = [];
-					var date = new Date(this.left);
+					var date = new Date(left);
 					date = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-					while (date.getTime() < this.right)
+					while (date.getTime() < right)
 					{
-						if (date.getHours() > 0 || date.getMinutes() > 0)
+						if (date.getTime() > left)
 						{
-							var tag = { time: date.getTime(), minor: true };
-							tag.label = GetHourStr(date, minuteInterval > 0);
-							tag.style = {
-								left: ((tag.time - this.timeBase) / this.zoomFactor) + 'px'
-							};
-							times.push(tag);
+							if (date.getHours() > 0 || date.getMinutes() > 0)
+							{
+								var tag = { time: date.getTime(), minor: true };
+								tag.label = GetHourStr(date, minuteInterval > 0);
+								tag.style = {
+									left: ((tag.time - left) / this.zoomFactor) + 'px'
+								};
+								times.push(tag);
+							}
 						}
 						if (minuteInterval > 0)
 							date.setMinutes(date.getMinutes() + minuteInterval);
@@ -6397,8 +7055,10 @@ function ClipTimeline()
 					var dayWeekCutoff = 1122000;
 					var weekMonthCutoff = 4544278;
 					var monthYearCutoff = 50000000;
+					var left = GetServerDate(new Date(this.left)).getTime();
+					var right = GetServerDate(new Date(this.right)).getTime();
 					var tags = [];
-					var date = new Date(this.left);
+					var date = GetServerDate(new Date(left));
 					if (this.zoomFactor < dayWeekCutoff)
 					{
 						// Show full days
@@ -6422,7 +7082,7 @@ function ClipTimeline()
 						date = new Date(date.getFullYear(), 0, 1);
 					}
 					var isFirst = true;
-					while (date.getTime() < this.right)
+					while (date.getTime() < right)
 					{
 						var tag = { time: date.getTime() };
 						if (this.zoomFactor < dayWeekCutoff)
@@ -6451,10 +7111,10 @@ function ClipTimeline()
 						}
 
 						tag.style = {
-							left: ((tag.time - this.timeBase) / this.zoomFactor) + 'px'
+							left: ((tag.time - left) / this.zoomFactor) + 'px'
 						};
 						if (isFirst)
-							tag.style.left = (((this.left - this.timeBase) / this.zoomFactor) - 1) + 'px';
+							tag.style.left = '-1px';
 						tags.push(tag);
 
 						isFirst = false;
@@ -6467,18 +7127,9 @@ function ClipTimeline()
 					}
 					return tags;
 				},
-				containerStyle: function ()
-				{
-					// Compute the left offset which the timeline must have so our center line is rendered at the time indicated by [currentTime].
-					var msLeftOfCurrent = (this.currentTime - this.timeBase);
-					var pxLeftOfCurrent = (msLeftOfCurrent / this.zoomFactor) - this.CenterBarCenterX;
-					return {
-						left: -pxLeftOfCurrent + 'px'
-					};
-				},
 				currentTimeStr: function ()
 				{
-					var date = new Date(this.currentTime);
+					var date = GetServerDate(new Date(this.currentTime));
 					return GetShortDateOrToday(date) + '\n' + GetTimeStr(date);
 				}
 			},
@@ -6486,115 +7137,50 @@ function ClipTimeline()
 			{
 			}
 		});
-		Vue.component('clip-timeline-loader', {
-			template: ''
-				+ '<div class="timelineLoader timelineContent" v-show="!!tags.length">'
-				+ '	<div class="timelineLoaderTag" v-for="tag in tags" :key="tag.id" :style="tag.style" :class="{ timelineLoaderTagWaiting: !tag.state, timelineLoaderTagLoading: tag.state === 1, timelineLoaderTagError: tag.state === 3 }" :title="tag.title">'
-				+ '		<div v-if="!tag.state" class="timelineLoaderWaiting">'
-				+ '			<svg class="icon noflip stroke"><use xlink:href="#svg_ellipsis"></use></svg>'
-				+ '		</div>'
-				+ '		<div v-if="tag.state === 1" class="spin1s">'
-				+ '			<svg class="icon noflip stroke"><use xlink:href="#svg_stroke_loading_circle"></use></svg>'
-				+ '		</div>'
-				+ '		<div v-else-if="tag.state === 3" class="timelineLoaderError">'
-				+ '			<svg class="icon noflip stroke"><use xlink:href="#svg_stroke_closeBtn"></use></svg>'
-				+ '		</div>'
-				+ '	</div>'
-				+ '</div>',
-			props:
-			{
-				/** Width of timeline in pixels */
-				width: Number,
-				/** Millisecond timestamp which DOM elements are positioned relative to. */
-				timeBase: Number,
-				/** Number of milliseconds per pixel. */
-				zoomFactor: Number,
-				/** Timestamp of the left edge */
-				left: Number,
-				/** Timestamp of the right edge */
-				right: Number,
-				/** Timestamp of the center (current time) */
-				currentTime: Number,
-				/** Object indicating loading status of every day. */
-				dayLoadingStatus: Object
-			},
-			computed:
-			{
-				tags: function ()
-				{
-					var tags = [];
-					var date = new Date(this.left);
-					date = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-					var idCtr = 1;
-					while (date.getTime() < this.right)
-					{
-						var tag = { id: idCtr++ };
-						tag.start = date.getTime();
-						var state = this.dayLoadingStatus[tag.start];
-						tag.state = state;
-						while (date.getTime() < this.right && state === this.dayLoadingStatus[date.getTime()])
-							date.setDate(date.getDate() + 1);
-						// states:
-						// undefined or 0: not loading
-						// 1: loading
-						// 2: loaded
-						// 3: error
-						if (state !== 2)
-						{
-							tag.end = date.getTime();
-							tag.style = {
-								left: ((tag.start - this.timeBase) / this.zoomFactor) + 'px',
-								width: ((tag.end - tag.start) / this.zoomFactor) + 'px'
-							};
-							tags.push(tag);
-							if (!state)
-								tag.title = "queued";
-							if (state === 1)
-								tag.title = "loading";
-							if (state === 2)
-								tag.title = "error";
-						}
-					}
-					return tags;
-				}
-			}
-		});
 
-		//Vue.component('clip-timeline-template', {
-		//	template: ''
-		//		+ '<div class="clipTimelineTemplate">'
-		//		+ '</div>',
-		//	data: function ()
-		//	{
-		//		return {
-		//		};
-		//	},
-		//	props:
-		//	{
-		//	},
-		//	created: function ()
-		//	{
-		//	},
-		//	mounted: function ()
-		//	{
-		//	},
-		//	beforeDestroy: function ()
-		//	{
-		//	},
-		//	methods:
-		//	{
-		//	},
-		//	computed:
-		//	{
-		//	},
-		//	watch:
-		//	{
-		//	}
-		//});
-		$("#layoutbottomTimeline").show();
-		var timelineComponent = new Vue({
-			el: "#layoutbottomTimeline"
-		});
+		// The [timeline] field will contain a reference to the component, set by the component after its creation.
+		new Vue({ el: "#layoutbottomTimeline" });
+
+		var optionTimeline =
+		{
+			alias: "cmroot_timeline", width: 200, items:
+				[
+					ThreeStateMenuItem.Create("timeline_skipDeadAir", "Skip dead-air", function ()
+					{
+						switch (this.data.alias)
+						{
+							case "timeline_skipDeadAir_nopreference":
+								settings.ui3_playback_skipDeadAir = "0";
+								videoPlayer.RefreshVideoStream();
+								break;
+							case "timeline_skipDeadAir_off":
+								settings.ui3_playback_skipDeadAir = "1";
+								videoPlayer.RefreshVideoStream();
+								break;
+							case "timeline_skipDeadAir_on":
+								settings.ui3_playback_skipDeadAir = "2";
+								videoPlayer.RefreshVideoStream();
+								break;
+						}
+					}),
+					{
+						text: '<span id="timeline_starfield_menuitem">Starfield Background</span>', iconClass: "noflip", icon: "#svg_mio_cbUnchecked", alias: "boringTimelineMode",
+						tooltip: 'The starfield background adds a little visual flair outside the timeline boundaries and when zoomed out a long way.',
+						action: function () { settings.ui3_timeline_starfield = settings.ui3_timeline_starfield === "1" ? "0" : "1"; }
+					}
+				]
+			, onContextMenu: function ()
+			{
+				var $boringMode = $("#timeline_starfield_menuitem");
+				$boringMode.parent().prev().find("use").attr("xlink:href", settings.ui3_timeline_starfield === "1" ? "#svg_mio_cbChecked" : "#svg_mio_cbUnchecked");
+
+				ThreeStateMenuItem.Refresh("timeline_skipDeadAir", parseInt(settings.ui3_playback_skipDeadAir));
+				return true;
+			}
+			, clickType: GetPreferredContextMenuTrigger()
+		};
+		$("#layoutbottomTimeline").contextmenu(optionTimeline);
+
 		resized();
 	}
 	this.getVue = function ()
@@ -6605,22 +7191,288 @@ function ClipTimeline()
 	{
 		return $tl_root.length && pointInsideElement($tl_root, x, y);
 	}
-	function RangeCompare(a, b)
+	/** Returns true if the timeline is currently responsible for pausing the video player. */
+	this.timelineDidPauseVideo = function ()
 	{
-		return a.time - b.time;
+		return timeline && timeline.timelineDidPauseVideo;
 	}
-	if (enabled)
-		self.Initialize();
+	this.BoundsCheckTimelineMs = function (timelineMs)
+	{
+		if (typeof timelineMs === "number")
+		{
+			if (timelineMs < 1)
+				timelineMs = 1;
+			var offset = GetUtcNow() - timelineMs;
+			if (offset < self.keepOutTime)
+				return undefined;
+			else
+				return timelineMs;
+		}
+		return undefined;
+	}
+	this.getCurrentTime = function ()
+	{
+		if (timeline)
+			return timeline.currentTime;
+		else
+			return GetUtcNow();
+	}
+	/**
+	 * Selects the given timestamp on the timeline.
+	 * @param {Number} timestampMs Milliseconds since unix epoch.
+	 */
+	this.seekTo = function (timestampMs)
+	{
+		if (timeline)
+		{
+			timeline.assignLastSetTime(timestampMs);
+			timeline.userDidSetTime();
+		}
+	}
+	/** Returns a timelineArgs object that will persist the current timeline playback position if sent to videoPlayer.LoadLiveCamera. */
+	this.getTimelineArgsForCameraSwitch = function ()
+	{
+		if (timeline && (videoPlayer.Loading().image.isTimeline() || (currentPrimaryTab === "timeline" && !videoPlayer.Loading().image.isLive)))
+			return timeline.getCurrentTimelineArgs();
+		return null;
+	}
+	/**
+	 * Efficiently draws a rounded-corner rectangle on a canvas 2d context.
+	 * It is a very trivial rounded corner algorithm with an emphasis on speed and matching Blue Iris's visual style.
+	 */
+	function roundRect(ctx, x, y, w, h)
+	{
+		var lhc = 1, rhc = 1; // Horizontal cutout
+		if (w < 2)
+			rhc = 0;
+		if (w < 3)
+			lhc = 0;
+		var vc = 1; // Vertical cutout
+		if (h < 3)
+		{
+			if (h < 2)
+				vc = 0;
+			else
+				vc = h / 3;
+		}
+		// Draw top
+		ctx.fillRect(x + lhc, y, w - lhc - rhc, vc);
+		// Draw middle
+		ctx.fillRect(x, y + vc, w, h - vc - vc);
+		// Draw bottom
+		ctx.fillRect(x + lhc, (y + h) - vc, w - lhc - rhc, vc);
+	}
+	self.Initialize();
 }
-function RangeChunk(ts)
+var timelineSync = new (function ()
 {
-	/** Key (timestamp of the day this chunk represents) */
-	this.ts = ts;
-	this.ranges = [];
+	var queue = new Queue();
+	var locked = false;
+	/**
+	 * Helps guarantee synchronous timeline access by only allowing one thing at a time to access timeline video in Blue Iris.
+	 * This function queues the passed-in function to run as soon as possible. 
+	 * The internal state is set to "locked" just before the passed function is called.
+	 * The passed function must call [unlock] when it is done accessing timeline video from Blue Iris.
+	 * @param {Function} fn Function to run.
+	 */
+	this.run = function (thisArg, fn)
+	{
+		queue.enqueue({ thisArg: thisArg, fn: fn });
+		processQueue();
+	}
+	/** Returns true if the current state is "locked". */
+	this.islocked = function ()
+	{
+		return locked;
+	}
+	/** Call this to just set the current state to "locked". You must call [unlock] later. */
+	this.lock = function ()
+	{
+		locked = true;
+	}
+	/** Call this when you are done accessing timeline video and it is safe to run another function from the queue. */
+	this.unlock = function ()
+	{
+		locked = false;
+		processQueue();
+	}
+	function processQueue()
+	{
+		if (locked)
+			return;
+		var item = queue.dequeue();
+		if (!item)
+			return;
+		locked = true;
+		try
+		{
+			item.fn.apply(item.thisArg);
+		}
+		catch (ex)
+		{
+			toaster.Error(ex);
+			locked = false;
+		}
+	}
+})();
+function StarfieldGenerator(blockSize, density, seedStr)
+{
+	// There are some very minor (cosmetic) continuity issues when the starfield expands, caused by the offsetX argument.
+	// We could mitigate that by separating horizontal and vertical block sizes and using a much larger horizontal block size so that expansion happens less often.
+	blockSize = Math.max(40, blockSize);
+	density = Clamp(density, 0.00001, 0.5);
+	var hues = [0, 60, 240];
+	var stars = [];
+	var blocksWide = 0;
+	var blocksHigh = 0;
+	var starsPerBlock = Math.round(blockSize * blockSize * density);
+
+	var lastDrawnBackBufferSize = "";
+	var backBuffer = document.createElement('canvas');
+
+	var r = new SeededRandom(seedStr);
+	function randInt(min, maxPlusOne)
+	{
+		return min + Math.floor(r.rand() * (maxPlusOne - min));
+	}
+	function addRow()
+	{
+		for (var i = 0; i < blocksWide; i++)
+			generateBlock(i, blocksHigh);
+		blocksHigh++;
+	}
+	function addColumn()
+	{
+		for (var i = 0; i < blocksHigh; i++)
+			generateBlock(blocksWide, i);
+		blocksWide++;
+	}
+	function generateBlock(x, y)
+	{
+		var xOffset = x * blockSize;
+		var yOffset = y * blockSize;
+		for (var i = 0; i < starsPerBlock; i++)
+		{
+			stars.push({
+				x: xOffset + r.rand() * blockSize,
+				y: yOffset + r.rand() * blockSize,
+				m: r.rand() * 1.2,
+				hue: hues[randInt(0, hues.length)],
+				sat: randInt(0, 31),
+				lig: randInt(20, 60)
+			});
+		}
+	}
+
+	function DrawBackBufferIfNecessary()
+	{
+		var dpr = BI_GetDevicePixelRatio();
+		var requiredBackBufferSize = blocksWide + "x" + blocksHigh + "@" + dpr;
+		if (lastDrawnBackBufferSize !== requiredBackBufferSize)
+		{
+			lastDrawnBackBufferSize = requiredBackBufferSize;
+			backBuffer.width = blockSize * blocksWide * dpr;
+			backBuffer.height = blockSize * blocksHigh * dpr;
+
+			var bb = backBuffer.getContext("2d");
+			bb.fillStyle = "#000000";
+			bb.fillRect(0, 0, backBuffer.width, backBuffer.height);
+			for (var i = 0; i < stars.length; i++)
+			{
+				var star = stars[i];
+				bb.beginPath();
+				bb.arc(star.x * dpr, star.y * dpr, star.m * dpr, 0, 360);
+				bb.fillStyle = "hsl(" + star.hue + ", " + star.sat + "%, " + star.lig + "%)";
+				bb.fill();
+			}
+		}
+	}
+
+	this.draw = function (ctx, dx, dy, dw, dh, offsetX)
+	{
+		var dpr = BI_GetDevicePixelRatio();
+		while (dh / dpr > blocksHigh * blockSize)
+			addRow();
+		while (dw / dpr > blocksWide * blockSize)
+			addColumn();
+		DrawBackBufferIfNecessary();
+		offsetX = ui3Modulus(offsetX, backBuffer.width);
+		var sx = offsetX;
+		var sy = 0;
+		var sw = Math.min(dw, backBuffer.width - sx);
+		var sh = dh;
+		var firstDrawW = sw;
+		if (sw > 0)
+			ctx.drawImage(backBuffer, sx, sy, sw, sh, dx, dy, firstDrawW, dh);
+		var rem = dw - firstDrawW;
+		if (rem)
+		{
+			sx = 0;
+			sw = rem;
+			if (sw > 0)
+				ctx.drawImage(backBuffer, sx, sy, sw, sh, dx + firstDrawW, dy, rem, dh);
+		}
+		//ctx.fillStyle = "rgba(138,95,62,1)";
+		//ctx.fillRect(dx + firstDrawW, dy, 1, dh);
+	};
 }
-function CompareRangeChunks(a, b)
+function TimelineRasterIcon(src, onLoad)
 {
-	return a.ts - b.ts;
+	var img = new Image();
+	var loadedOk = false;
+	var myW;
+	var myH;
+	var lastDpr = null;
+	var scale;
+	var w;
+	var h;
+	var xOffset;
+	var yOffset;
+	img.onload = function ()
+	{
+		myW = img.naturalWidth;
+		myH = img.naturalHeight;
+		loadedOk = !!(myW && myH);
+		if (loadedOk)
+		{
+			if (typeof onLoad === "function")
+				onLoad();
+		}
+	};
+	img.src = src;
+
+	var calcScaleValues = function (dpr)
+	{
+		if (dpr !== lastDpr)
+		{
+			lastDpr = dpr;
+			scale = (myH / 12) / dpr;
+			w = myW / scale;
+			h = myH / scale;
+			xOffset = w / 2;
+			yOffset = 0 * dpr;
+		}
+	}
+	/**
+	 * Draws the image on the canvas at the specified location.
+	 * @param {Number} ctx Device pixel ratio
+	 * @param {Number} canvasWidth Width of the canvas element for culling purposes.
+	 * @param {Number} dpr Device pixel ratio
+	 * @param {Number} x Image will be drawn with center at this X-coordinate.
+	 * @param {Number} y Image will be drawn with top at this Y-coordinate.
+	 */
+	this.draw = function (ctx, canvasWidth, dpr, x, y)
+	{
+		if (loadedOk)
+		{
+			calcScaleValues(dpr);
+
+			x -= xOffset;
+			y += yOffset;
+			if (x < canvasWidth && x + w > 0)
+				ctx.drawImage(img, x, y, w, h);
+		}
+	}
 }
 ///////////////////////////////////////////////////////////////
 // Zebra Date Picker //////////////////////////////////////////
@@ -6846,7 +7698,7 @@ function PlaybackControls()
 	var hideTimeout = null;
 	var showTimeouts = [];
 	var isVisible = $pc.is(":visible");
-	var settingsClosedAt = 0;
+	var settingsClosedAt = -9999;
 	var playReverse = settings.ui3_playback_reverse == "1";
 	var autoplay = settings.ui3_playback_autoplay == "1";
 	var loopingEnabled = settings.ui3_playback_loop == "1";
@@ -6907,7 +7759,8 @@ function PlaybackControls()
 			isVisible = true;
 			self.resized();
 		}
-		if (videoPlayer.Loading().image.isLive)
+		var loadingImg = videoPlayer.Loading().image;
+		if (loadingImg.isLive)
 		{
 			playbackHeader.Hide();
 			$("#seekBarWrapper").hide();
@@ -6916,8 +7769,16 @@ function PlaybackControls()
 		}
 		else
 		{
-			playbackHeader.Show();
-			$("#seekBarWrapper").show();
+			if (loadingImg.isTimeline())
+			{
+				playbackHeader.Hide();
+				$("#seekBarWrapper").hide();
+			}
+			else
+			{
+				playbackHeader.Show();
+				$("#seekBarWrapper").show();
+			}
 			$("#pcButtonContainer .hideWhenLive").removeClass('temporarilyUnavailable');
 			$("#pcButtonContainer .showWhenLive").addClass('temporarilyUnavailable');
 		}
@@ -6945,7 +7806,8 @@ function PlaybackControls()
 			isVisible = true;
 			self.resized();
 		}
-		if (videoPlayer.Loading().image.isLive)
+		var loadingImg = videoPlayer.Loading().image;
+		if (loadingImg.isLive || loadingImg.isTimeline())
 			playbackHeader.Hide();
 		else
 			playbackHeader.FadeIn();
@@ -7021,15 +7883,20 @@ function PlaybackControls()
 			$("#pcPlay").hide();
 			$("#pcPause").hide();
 		}
-		else if (paused)
-		{
-			$("#pcPlay").show();
-			$("#pcPause").hide();
-		}
 		else
 		{
-			$("#pcPlay").hide();
-			$("#pcPause").show();
+			if (typeof paused === "undefined")
+				paused = videoPlayer.Playback_IsPaused();
+			if (paused)
+			{
+				$("#pcPlay").show();
+				$("#pcPause").hide();
+			}
+			else
+			{
+				$("#pcPlay").hide();
+				$("#pcPause").show();
+			}
 		}
 		mediaSessionController.setMediaState();
 	}
@@ -7080,29 +7947,51 @@ function PlaybackControls()
 	});
 	this.OpenSettingsPanel = function ()
 	{
-		if (new Date().getTime() - 33 <= settingsClosedAt)
+		if (performance.now() - 33 <= settingsClosedAt)
 			return;
 		if (videoPlayer.Loading().image.isLive)
 			return OpenQualityPanel();
 		RebuildSettingsPanelEmpty();
-		$playbackSettings.append('<div class="playbackSettingsCheckboxWrapper">'
-			+ '<input id="cbAutoplay" type="checkbox" class="sliderCb" onclick="playbackControls.AutoplayClicked()" '
-			+ (autoplay ? ' checked="checked"' : '')
-			+ '/>'
-			+ '<label for="cbAutoplay"><span class="ui"></span>Autoplay<div class="playbackSettingsSpacer"></div></label>'
-			+ '</div>');
+		var isTimeline = videoPlayer.Loading().image.isTimeline();
+		if (!isTimeline)
+			$playbackSettings.append('<div class="playbackSettingsCheckboxWrapper">'
+				+ '<input id="cbAutoplay" type="checkbox" class="sliderCb" onclick="playbackControls.AutoplayClicked()" '
+				+ (autoplay ? ' checked="checked"' : '')
+				+ '/>'
+				+ '<label for="cbAutoplay"><span class="ui"></span>Autoplay<div class="playbackSettingsSpacer"></div></label>'
+				+ '</div>');
 		$playbackSettings.append('<div class="playbackSettingsCheckboxWrapper">'
 			+ '<input id="cbReverse" type="checkbox" class="sliderCb" onclick="playbackControls.ReverseClicked()" '
 			+ (playReverse ? ' checked="checked"' : '')
 			+ '/>'
 			+ '<label for="cbReverse"><span class="ui"></span>Reverse<div class="playbackSettingsSpacer"></div></label>'
 			+ '</div>');
-		$playbackSettings.append('<div class="playbackSettingsCheckboxWrapper">'
-			+ '<input id="cbLoop" type="checkbox" class="sliderCb" onclick="playbackControls.LoopClicked()" '
-			+ (loopingEnabled ? ' checked="checked"' : '')
-			+ '/>'
-			+ '<label for="cbLoop"><span class="ui"></span>Loop<div class="playbackSettingsSpacer"></div></label>'
-			+ '</div>');
+		if (!isTimeline)
+			$playbackSettings.append('<div class="playbackSettingsCheckboxWrapper">'
+				+ '<input id="cbLoop" type="checkbox" class="sliderCb" onclick="playbackControls.LoopClicked()" '
+				+ (loopingEnabled ? ' checked="checked"' : '')
+				+ '/>'
+				+ '<label for="cbLoop"><span class="ui"></span>Loop<div class="playbackSettingsSpacer"></div></label>'
+				+ '</div>');
+		if (isTimeline)
+		{
+			var $line = $('<label class="playbackSettingsLine">Skip dead-air</label>');
+			var $wrapper = $('<span class="playbackSettingsFloatRight"></span>');
+			$line.append($wrapper);
+			$wrapper.append(UIFormField({
+				inputType: "threeState"
+				, value: settings.ui3_playback_skipDeadAir
+				, tag: "skipDeadAir",
+				onChange: function (e, value, $btn)
+				{
+					self.FadeIn();
+					hideAfterTimeout();
+					settings.ui3_playback_skipDeadAir = value.toString();
+					OnChange_ui3_playback_skipDeadAir();
+				}
+			}));
+			$playbackSettings.append($line);
+		}
 		var $speedBtn = $('<div class="playbackSettingsLine speedBtn">'
 			+ 'Speed<div class="playbackSettingsFloatRight">'
 			+ (playSpeed == 1 ? "Normal" : playSpeed)
@@ -7123,11 +8012,19 @@ function PlaybackControls()
 	{
 		RebuildSettingsPanelEmpty();
 		$playbackSettings.addClass("speedPanel");
-		var $backBtn = $('<div class="playbackSettingsLine playbackSettingsHeading">'
-			+ '<div class="playbackSettingsLeftArrow"><svg class="icon"><use xlink:href="#svg_x5F_PTZcardinalLeft"></use></svg></div> '
-			+ 'Speed</div>');
-		$backBtn.click(self.OpenSettingsPanel);
 		$playbackSettings.append($backBtn);
+		if (videoPlayer.Loading().image.isTimeline())
+		{
+			$playbackSettings.append('<div class="playbackSettingsLine playbackSettingsHeading" style="cursor: default;">Speed</div>');
+		}
+		else
+		{
+			var $backBtn = $('<div class="playbackSettingsLine playbackSettingsHeading">'
+				+ '<div class="playbackSettingsLeftArrow"><svg class="icon"><use xlink:href="#svg_x5F_PTZcardinalLeft"></use></svg></div> '
+				+ 'Speed</div>');
+			$backBtn.click(self.OpenSettingsPanel);
+			$playbackSettings.append($backBtn);
+		}
 
 		for (var i = 0; i < SpeedOptions.length; i++)
 		{
@@ -7152,11 +8049,11 @@ function PlaybackControls()
 	{
 		RebuildSettingsPanelEmpty();
 		$playbackSettings.addClass("qualityPanel");
-		var live = videoPlayer.Loading().image.isLive;
+		var showBackBtn = !videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline();
 		var $backBtn = $('<div class="playbackSettingsLine playbackSettingsHeading">'
-			+ (live ? '' : '<div class="playbackSettingsLeftArrow"><svg class="icon"><use xlink:href="#svg_x5F_PTZcardinalLeft"></use></svg></div> ')
+			+ (showBackBtn ? '<div class="playbackSettingsLeftArrow"><svg class="icon"><use xlink:href="#svg_x5F_PTZcardinalLeft"></use></svg></div> ' : '')
 			+ 'Quality</div>');
-		if (!live)
+		if (showBackBtn)
 			$backBtn.click(self.OpenSettingsPanel);
 		else
 			$backBtn.css('cursor', 'default');
@@ -7214,7 +8111,7 @@ function PlaybackControls()
 		{
 			$playbackSettings.remove();
 			$playbackSettings = $();
-			settingsClosedAt = new Date().getTime();
+			settingsClosedAt = performance.now();
 		}
 	}
 	var RebuildSettingsPanelEmpty = function ()
@@ -7289,6 +8186,19 @@ function PlaybackControls()
 	this.GetLoopingEnabled = function ()
 	{
 		return loopingEnabled;
+	}
+	this.GetSkipDeadAirState = function ()
+	{
+		return settings.ui3_playback_skipDeadAir;
+	}
+	this.GetSkipDeadAirArg = function ()
+	{
+		if (settings.ui3_playback_skipDeadAir === "2")
+			return "&skipdeadair=1";
+		else if (settings.ui3_playback_skipDeadAir === "1")
+			return "&skipdeadair=0";
+		else
+			return "&skipdeadair=";
 	}
 	this.ChangePlaySpeed = function (offset)
 	{
@@ -7537,9 +8447,9 @@ function SeekBar()
 	{
 		if (!seekHintVisible)
 			return;
-		if (videoPlayer.Loading().image.isLive)
+		if (videoPlayer.Loading().image.isLive || videoPlayer.Loading().image.isTimeline())
 		{
-			console.log("Cannot update seek hint while loading live video");
+			console.log("Cannot update seek hint while loading live video or timeline video");
 			return;
 		}
 		// Update seek hint text and location
@@ -7587,32 +8497,17 @@ function SeekBar()
 			seekHintInfo.loadingMsec = msec;
 			if (seekHintInfo.lastSnapshotId != "" && seekHintInfo.lastSnapshotId == videoPlayer.GetStaticSnapshotId())
 				return; // No need to load same snapshot as before
-			seekHintInfo.lastSnapshotId = videoPlayer.GetStaticSnapshotId();
-			var largestDimensionKey;
-			var largestDimensionValue;
-			var hintW;
-			var hintH;
+
 			var loadingImg = videoPlayer.Loading().image;
-			if (loadingImg.aspectratio >= 1)
-			{
-				largestDimensionKey = "w";
-				largestDimensionValue = imageRenderer.GetSizeToRequest(false, loadingImg).w;
-				hintW = 160;
-				hintH = (hintW / videoPlayer.Loading().image.aspectratio);
-			}
-			else
-			{
-				largestDimensionKey = "h";
-				largestDimensionValue = imageRenderer.GetSizeToRequest(false, loadingImg).h;
-				hintH = 160;
-				hintW = (hintH * videoPlayer.Loading().image.aspectratio);
-			}
-			var hintMarginLeft = Clamp((160 - hintW) / 2, 0, 160);
-			seekhint_canvas.css("margin-left", hintMarginLeft + "px").css('width', hintW + 'px').css('height', hintH + 'px');
-			seekhint_loading.css("margin-left", hintMarginLeft + "px").css('width', hintW + 'px').css('height', hintH + 'px');
+			seekHintInfo.lastSnapshotId = videoPlayer.GetStaticSnapshotId();
+			var sizeToRequest = imageRenderer.GetSizeToRequest(loadingImg);
+			sizeToRequest.ApplyBoundingBox(new ui3Rect(160, 160));
+			var hintMarginLeft = Clamp((160 - sizeToRequest.w) / 2, 0, 160);
+			seekhint_canvas.css("margin-left", hintMarginLeft + "px").css('width', sizeToRequest.w + 'px').css('height', sizeToRequest.h + 'px');
+			seekhint_loading.css("margin-left", hintMarginLeft + "px").css('width', sizeToRequest.w + 'px').css('height', sizeToRequest.h + 'px');
 			if (seekHintInfo.canvasVisible)
 			{
-				var loadSize = Math.min(hintW, hintH);
+				var loadSize = Math.min(sizeToRequest.w, sizeToRequest.h);
 				$("#seekhint_loading_anim").css('width', loadSize + 'px').css('height', loadSize + 'px')
 				seekhint_loading.removeClass('hidden');
 			}
@@ -7622,17 +8517,19 @@ function SeekBar()
 				videoOverlayHelper.ShowLoadingOverlay(true, true);
 
 				var subStreamArg = settings.ui3_seek_with_substream === "1" ? "&decode=-1" : "";
-				qualityArgs = genericQualityHelper.getSeekPreviewQualityArgs(largestDimensionKey, largestDimensionValue) + subStreamArg;
+				qualityArgs = genericQualityHelper.getSeekPreviewQualityArgs(loadingImg) + subStreamArg;
 			}
 			else
-				qualityArgs = "&" + largestDimensionKey + "=160&q=50&decode=-1"
-			seekhint_img.attr('src', videoPlayer.GetLastSnapshotUrl().replace(/time=\d+/, "time=" + msec) + qualityArgs);
+				qualityArgs = "&w=" + sizeToRequest.w + "&h=" + sizeToRequest.h + "&q=50&stream=0&decode=-1";
+			var url = RemoveUrlParameters(videoPlayer.GetLastSnapshotUrl(), "time", "w", "h", "q", "stream");
+			url += "&time=" + msec + qualityArgs;
+			seekhint_img.attr('src', url);
 		}
 	}
 	this.resetSeekHintImg = function ()
 	{
 		seekHintInfo.loadingMsec = seekHintInfo.queuedMsec = seekHintInfo.visibleMsec = -1;
-		seekhint_canvas.css('height', (160 / videoPlayer.Loading().image.aspectratio) + 'px');
+		seekhint_canvas.css('height', (160 / videoPlayer.Loading().image.getFullRect().AspectRatio()) + 'px');
 		ClearCanvas(seekhint_canvas_ele);
 		seekhint_loading.addClass('hidden');
 	}
@@ -7651,7 +8548,7 @@ function SeekBar()
 			timeValue = 0;
 		else
 			timeValue = (msec - 1) * percentValue;
-		if (!videoPlayer.Loading().image.isLive)
+		if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 			playbackControls.SetProgressText(msToTime(timeValue, 0) + " / " + msToTime(msec, 0));
 	}
 	this.drawSeekbarAtTime = function (timeValue)
@@ -7669,7 +8566,7 @@ function SeekBar()
 		handle.css("left", x + "px");
 		if (timeValue == msec - 1)
 			timeValue = msec;
-		if (!videoPlayer.Loading().image.isLive)
+		if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 			playbackControls.SetProgressText(msToTime(timeValue, 0) + " / " + msToTime(msec, 0));
 	}
 	this.IsDragging = function ()
@@ -7902,7 +8799,7 @@ function ExportControls()
 
 		var startTime = 0;
 		var endTime = 1;
-		if ((clipData.flags & alert_flag_offsetMs) !== 0)
+		if ((clipData.flags & BIDBFLAG_ALERT_OFFSETTIME) !== 0)
 		{
 			startTime = clipData.offsetMs / (fileDuration - 1);
 			endTime = (clipData.offsetMs + clipData.roughLengthMs) / (fileDuration - 1);
@@ -8353,7 +9250,7 @@ function ClipData(clip)
 	clipData.alertPath = clip.path; // Alert path if this is an alert, otherwise just another copy of the clip path.
 	clipData.offsetMs = clip.offset ? clip.offset : 0;
 	clipData.flags = clip.flags;
-	clipData.audio = (clip.flags & clip_flag_audio) > 0;
+	clipData.audio = (clip.flags & BIDBFLAG_AUDIO) > 0;
 	clipData.date = new Date(clip.date * 1000);
 	clipData.displayDate = GetServerDate(clipData.date);
 	clipData.colorHex = BlueIrisColorToCssColor(clip.color);
@@ -8429,7 +9326,7 @@ function ClipLoader(clipsBodySelector)
 	this.LoadClips = function ()
 	{
 		var loading = videoPlayer.Loading();
-		if (loading.image && loading.image.isLive)
+		if (loading.image && (loading.image.isLive || loading.image.isTimeline()))
 			lastLoadedCameraFilter = loading.image.id;
 		loadClipsInternal(lastLoadedCameraFilter, dateFilter.BeginDate, dateFilter.EndDate, false, false, null, settings.ui3_current_dbView);
 	}
@@ -8448,7 +9345,7 @@ function ClipLoader(clipsBodySelector)
 		if (dateFilter.BeginDate != 0 && dateFilter.EndDate != 0)
 			return;
 		// We request clips starting from 60 seconds earlier so that metadata of recent clips may be updated.
-		loadClipsInternal(lastLoadedCameraFilter, newestClipDate - 60, newestClipDate + 86400, false, true, null, settings.ui3_current_dbView);
+		loadClipsInternal(lastLoadedCameraFilter, newestClipDate - 60, Math.round(GetUtcNow() / 1000) + 86400, false, true, null, settings.ui3_current_dbView);
 	}
 	this.LoadClipsRange = function (camFilter, dateBegin, dateEnd)
 	{
@@ -8629,7 +9526,7 @@ function ClipLoader(clipsBodySelector)
 						TotalUniqueClipsLoaded++;
 						clipListCache[clipData.camera][clipData.recId] = clipData;
 						clipListIdCache[clipData.recId] = clipData;
-						if (!isUpdateOfExistingList && previouslyOpenedClip == null && !loadingImage.isLive && loadingImage.uniqueId == clipData.recId)
+						if (!isUpdateOfExistingList && previouslyOpenedClip == null && !loadingImage.isLive && !loadingImage.isTimeline() && loadingImage.uniqueId == clipData.recId)
 							previouslyOpenedClip = clipData;
 					}
 				}
@@ -8682,7 +9579,7 @@ function ClipLoader(clipsBodySelector)
 				}
 			}
 
-			if (!isUpdateOfExistingList && previouslyOpenedClip == null && startupClipData && !loadingImage.isLive && loadingImage.uniqueId == startupClipData.recId)
+			if (!isUpdateOfExistingList && previouslyOpenedClip == null && startupClipData && !loadingImage.isLive && !loadingImage.isTimeline() && loadingImage.uniqueId == startupClipData.recId)
 				previouslyOpenedClip = startupClipData;
 
 			isLoadingAClipList = false;
@@ -8711,7 +9608,7 @@ function ClipLoader(clipsBodySelector)
 				tileLoader.AppearDisappearCheckEnabled = true;
 				tileLoader.appearDisappearCheck();
 
-				if (!loadingImage.isLive && !isUpdateOfExistingList)
+				if (!loadingImage.isLive && !loadingImage.isTimeline() && !isUpdateOfExistingList)
 				{
 					if (previouslyOpenedClip == null)
 						self.CloseCurrentClip();
@@ -9310,7 +10207,10 @@ function ClipLoader(clipsBodySelector)
 				$(currentClipEle).removeClass("opened");
 		}
 		this.SetStartupClip(null);
-		videoPlayer.goLive();
+		if (currentPrimaryTab === "timeline")
+			videoPlayer.openTimelineAt(videoPlayer.lastFrameUtc);
+		else
+			videoPlayer.goLive();
 	}
 	this.UnselectAllClips = function (alsoRemoveOpenedStatus)
 	{
@@ -9379,7 +10279,7 @@ function ClipLoader(clipsBodySelector)
 	this.FlagCurrentClip = function ()
 	{
 		var cli = videoPlayer.Loading().image;
-		if (cli.isLive)
+		if (cli.isLive || cli.isTimeline())
 			return;
 		var clipData = this.GetClipFromId(cli.uniqueId);
 		if (!sessionManager.IsAdministratorSession(cli.uniqueId))
@@ -9392,20 +10292,20 @@ function ClipLoader(clipsBodySelector)
 	this.ExportCurrentClip = function ()
 	{
 		var cli = videoPlayer.Loading().image;
-		if (cli.isLive)
+		if (cli.isLive || cli.isTimeline())
 			return;
 		exportControls.Enable(cli.uniqueId);
 	}
 	var GetClipIconClasses = function (clipData)
 	{
 		var classes = [];
-		if ((clipData.flags & clip_flag_flag) > 0)
+		if ((clipData.flags & BIDBFLAG_FLAGGED) > 0)
 			classes.push(GetClipIconClass("flag"));
-		if ((clipData.flags & clip_flag_protect) > 0)
+		if ((clipData.flags & BIDBFLAG_PROTECTED) > 0)
 			classes.push(GetClipIconClass("protect"));
 		if (clipData.isNew)
 			classes.push(GetClipIconClass("is_new"));
-		if ((clipData.flags & alert_flag_sentry_trigger) > 0)
+		if ((clipData.flags & BIDBFLAG_AI_CONFIRMED_X) > 0)
 			classes.push(GetClipIconClass("trigger_sentry"));
 		return classes.join(" ");
 	}
@@ -9418,21 +10318,21 @@ function ClipLoader(clipsBodySelector)
 		var icons = [];
 		if (settings.ui3_clipicon_trigger_sentry == "1")
 			icons.push(self.GetClipIcon("trigger_sentry"));
-		if ((clipData.flags & alert_flag_sentry_occupied) > 0 && settings.ui3_clipicon_trigger_sentry_occupied == "1")
+		if ((clipData.flags & BIDBFLAG_AI_OCCUPIED_X) > 0 && settings.ui3_clipicon_trigger_sentry_occupied == "1")
 			icons.push(self.GetClipIcon("trigger_sentry_occupied"));
-		if ((clipData.flags & alert_flag_trigger_motion) > 0 && settings.ui3_clipicon_trigger_motion == "1")
+		if ((clipData.flags & BIDBFLAG_ALERT_MOTION) > 0 && settings.ui3_clipicon_trigger_motion == "1")
 			icons.push(self.GetClipIcon("trigger_motion"));
-		if ((clipData.flags & alert_flag_trigger_audio) > 0 && settings.ui3_clipicon_trigger_audio == "1")
+		if ((clipData.flags & BIDBFLAG_ALERT_AUDIO) > 0 && settings.ui3_clipicon_trigger_audio == "1")
 			icons.push(self.GetClipIcon("trigger_audio"));
-		if ((clipData.flags & alert_flag_trigger_external) > 0 && settings.ui3_clipicon_trigger_external == "1")
+		if ((clipData.flags & BIDBFLAG_ALERT_EXTERNAL) > 0 && settings.ui3_clipicon_trigger_external == "1")
 			icons.push(self.GetClipIcon("trigger_external"));
-		if ((clipData.flags & alert_flag_trigger_group) > 0 && settings.ui3_clipicon_trigger_group == "1")
+		if ((clipData.flags & BIDBFLAG_ALERT_GROUP) > 0 && settings.ui3_clipicon_trigger_group == "1")
 			icons.push(self.GetClipIcon("trigger_group"));
-		if ((clipData.flags & clip_flag_audio) > 0 && settings.ui3_clipicon_clip_audio == "1")
+		if ((clipData.flags & BIDBFLAG_AUDIO) > 0 && settings.ui3_clipicon_clip_audio == "1")
 			icons.push(self.GetClipIcon("clip_audio"));
-		if ((clipData.flags & clip_flag_backingup) > 0 && settings.ui3_clipicon_clip_backingup == "1")
+		if ((clipData.flags & BIDBFLAG_ARCHIVE) > 0 && settings.ui3_clipicon_clip_backingup == "1")
 			icons.push(self.GetClipIcon("clip_backingup"));
-		if ((clipData.flags & clip_flag_backedup) > 0 && settings.ui3_clipicon_clip_backup == "1")
+		if ((clipData.flags & BIDBFLAG_ARCHIVED) > 0 && settings.ui3_clipicon_clip_backup == "1")
 			icons.push(self.GetClipIcon("clip_backedup"));
 		if (settings.ui3_clipicon_is_new === "1")
 			icons.push(self.GetClipIcon("is_new"));
@@ -9446,7 +10346,7 @@ function ClipLoader(clipsBodySelector)
 		switch (name)
 		{
 			case "trigger_sentry":
-				return GetClipIcon_Internal(name, "#sentry_logo", true, "AI-verified alert");
+				return GetClipIcon_Internal(name, "#svg_mio_cbChecked", true, "AI-verified alert");
 			case "trigger_sentry_occupied":
 				return GetClipIcon_Internal(name, "#sentry_human", true, "AI-verified continuation of a previous alert");
 			case "trigger_motion":
@@ -9545,7 +10445,7 @@ function ClipLoader(clipsBodySelector)
 		else
 		{
 			// This is an alert we're trying to export.  We can probably set a range.
-			if ((clipData.flags & alert_flag_offsetMs) !== 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_OFFSETTIME) !== 0)
 			{
 				args.startms = clipData.offsetMs;
 				args.msec = clipData.roughLengthMs;
@@ -9604,7 +10504,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.ToggleClipProtect = function (clipData, onSuccess, onFailure)
 	{
-		ToggleFlag(clipData, clip_flag_protect, function (clipData, flagIsSet)
+		ToggleFlag(clipData, BIDBFLAG_PROTECTED, function (clipData, flagIsSet)
 		{
 			if (flagIsSet)
 				self.HideClipProtect(clipData);
@@ -9616,7 +10516,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.ToggleClipFlag = function (clipData, onSuccess, onFailure)
 	{
-		ToggleFlag(clipData, clip_flag_flag, function (clipData, flagIsSet)
+		ToggleFlag(clipData, BIDBFLAG_FLAGGED, function (clipData, flagIsSet)
 		{
 			if (flagIsSet)
 				self.HideClipFlag(clipData);
@@ -9628,7 +10528,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.ToggleAlertAiConfirmed = function (clipData, onSuccess, onFailure)
 	{
-		ToggleFlag(clipData, alert_flag_sentry_trigger, function (clipData, flagIsSet)
+		ToggleFlag(clipData, BIDBFLAG_AI_CONFIRMED_X, function (clipData, flagIsSet)
 		{
 			if (flagIsSet)
 				self.HideAiConfirmed(clipData);
@@ -9653,7 +10553,7 @@ function ClipLoader(clipsBodySelector)
 	this.HideClipFlag = function (clipData)
 	{
 		var cli = videoPlayer.Loading().image;
-		if (!cli.isLive && cli.uniqueId === clipData.recId)
+		if (cli.uniqueId === clipData.recId)
 			$("#clipFlagButton").removeClass("flagged");
 		var $clip = $("#c" + clipData.recId);
 		if ($clip.length == 0)
@@ -9664,7 +10564,7 @@ function ClipLoader(clipsBodySelector)
 	this.ShowClipFlag = function (clipData)
 	{
 		var cli = videoPlayer.Loading().image;
-		if (!cli.isLive && cli.uniqueId === clipData.recId)
+		if (cli.uniqueId === clipData.recId)
 			$("#clipFlagButton").addClass("flagged");
 		var $clip = $("#c" + clipData.recId);
 		if ($clip.length == 0)
@@ -9697,7 +10597,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.ClipDataIndicatesFlagged = function (clipData)
 	{
-		return (clipData.flags & clip_flag_flag) > 0;
+		return (clipData.flags & BIDBFLAG_FLAGGED) > 0;
 	}
 	this.HideAiConfirmed = function (clipData)
 	{
@@ -9724,7 +10624,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.AlertDataIndicatesAIConfirmed = function (clipData)
 	{
-		return (clipData.flags & alert_flag_sentry_trigger) > 0;
+		return (clipData.flags & BIDBFLAG_AI_CONFIRMED_X) > 0;
 	}
 	this.Multi_Flag = function (clipIDs, flagEnable, idx, myToast)
 	{
@@ -9801,7 +10701,7 @@ function ClipLoader(clipsBodySelector)
 			function ()
 			{
 				self.UnselectAllClips();
-				if (!videoPlayer.Loading().image.isLive)
+				if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 					clipLoader.SelectClipIdNoOpen(videoPlayer.Loading().image.uniqueId);
 				for (var i = 0; i < allSelectedClipIDs.length; i++)
 					self.DisableClipTileById(allSelectedClipIDs[i]);
@@ -9813,7 +10713,7 @@ function ClipLoader(clipsBodySelector)
 	}
 	this.DeleteCurrentClip = function ()
 	{
-		if (!videoPlayer.Loading().image.isLive)
+		if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 		{
 			var clip_to_delete = videoPlayer.Loading().image.uniqueId;
 			var deleter = function ()
@@ -9921,7 +10821,7 @@ function ClipLoader(clipsBodySelector)
 			}
 			else if (o.operation == "protect")
 			{
-				var isProtected = (clipData.flags & clip_flag_protect) > 0;
+				var isProtected = (clipData.flags & BIDBFLAG_PROTECTED) > 0;
 				if ((isProtected && !o.args.protectEnable) || (!isProtected && o.args.protectEnable))
 				{
 					self.ToggleClipProtect(clipData, function ()
@@ -9988,7 +10888,7 @@ function ClipLoader(clipsBodySelector)
 	this.GetCurrentClipEle = function ()
 	{
 		var img = videoPlayer.Loading().image;
-		if (!img.isLive)
+		if (!img.isLive && !videoPlayer.Loading().image.isTimeline())
 		{
 			var $clip = $("#c" + img.uniqueId);
 			if ($clip.length)
@@ -10117,7 +11017,7 @@ function ClipLoader(clipsBodySelector)
 }
 function DbViewIsAlerts(dbView)
 {
-	return dbView === "alerts" || dbView === "cancelled" || dbView === "confirmed" || dbView.match("zone[a-h]") || dbView === "dio" || dbView === "onvif" || dbView === "audio" || dbView === "external";
+	return dbView === "alerts" || dbView === "cancelled" || dbView === "confirmed" || dbView === "people" || dbView === "vehicles" || dbView.match("zone[a-h]") || dbView === "dio" || dbView === "onvif" || dbView === "audio" || dbView === "external";
 }
 function SetClipListShortcutIconState(iconSelector, selected)
 {
@@ -10538,7 +11438,7 @@ function ClipListDynamicTileLoader(clipsBodySelector, callbackCurrentDateFunc)
 
 	this.appearDisappearCheck = function ()
 	{
-		if (!self.AppearDisappearCheckEnabled || appearDisappearRegisteredObjects.length == 0 || currentPrimaryTab == "live")
+		if (!self.AppearDisappearCheckEnabled || appearDisappearRegisteredObjects.length == 0 || currentPrimaryTab != "clips")
 			return;
 		var scrollTop = $clipsbody.scrollTop();
 		var yMin = scrollTop - aboveAllowance;
@@ -10615,7 +11515,7 @@ function ClipListDynamicTileLoader(clipsBodySelector, callbackCurrentDateFunc)
 	var prepareClipDataForRegistration = function (obj, callbackOnAppearFunc, callbackOnDisappearFunc, callbackOnMoveFunc, HeightOfOneClipTilePx, HeightOfOneDateTilePx)
 	{
 		obj.isAppeared = false;
-		obj.isDateTile = obj.isDateTile;
+		//obj.isDateTile = obj.isDateTile;
 		obj.y = nextY;
 		obj.h = obj.isDateTile ? HeightOfOneDateTilePx : HeightOfOneClipTilePx;
 		nextY += obj.h;
@@ -10700,6 +11600,18 @@ function ClipListDynamicTileLoader(clipsBodySelector, callbackCurrentDateFunc)
 // Status Update //////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 var serverTimeZoneOffsetMs = 0;
+/** Millisecond offset to be added to the local clock to make it match the server clock. */
+var currentServerTimeOffset = 0;
+/** Gets the current time in milliseconds since the epoch, from the perspective of the server. This method corrects clock sync differences between client and server. */
+function GetUtcNow()
+{
+	return GetSyncedTime(Date.now());
+}
+/** Offsets the given client timestamp to correct for time sync error between client and server (trusts server clock). */
+function GetSyncedTime(time)
+{
+	return time + currentServerTimeOffset;
+}
 function StatusLoader()
 {
 	var self = this;
@@ -10709,16 +11621,16 @@ function StatusLoader()
 	var currentProfileNames = null;
 	var currentlySelectedSchedule = null;
 	var globalScheduleEnabled = false;
+	var profileButtonsEnabled = true;
 	var profileChangedTimeout = null;
 	var statusUpdateTimeout = null;
-	var $profileBtns = $(".profilebtn");
+	var $profileDropdown = $('.dropdownBox[name="profile"]');
 	var $scheduleLockBtn = $("#schedule_lock_button");
 	var $scheduleLockIcon = $("#schedule_lock_icon use");
 	var $stoplightDiv = $("#stoplightBtn div");
 	var $stoplightRed = $("#stoplightRed");
 	var $stoplightGreen = $("#stoplightGreen");
 	var $stoplightYellow = $("#stoplightYellow");
-	var $profileStatusBox = $("#profileStatusBox");
 
 	statusBars.addOnProgressChangedListener("cpu", function (cpu)
 	{
@@ -10759,6 +11671,13 @@ function StatusLoader()
 	{
 		loadStatusInternal();
 	}
+	this.LoadProfile = function (profileNum)
+	{
+		if (profileNum >= -1 && profileNum <= 7)
+			loadStatusInternal(profileNum);
+		else
+			toaster.Error("Cannot load profile " + profileNum);
+	}
 	var loadStatusInternal = function (profileNum, stoplightState, schedule)
 	{
 		if (statusUpdateTimeout != null)
@@ -10796,8 +11715,10 @@ function StatusLoader()
 			else
 				openLoginDialog(function () { loadStatusInternal(profileNum, stoplightState, schedule); });
 		}
+		var requestStart = performance.now();
 		ExecJSON(args, function (response)
 		{
+			var requestEnd = performance.now();
 			EndConnectionErrors();
 			lastStatusUpdateAt = performance.now();
 			if (response && typeof response.result != "undefined" && response.result == "fail")
@@ -10856,7 +11777,7 @@ function StatusLoader()
 				else if (response.data.clips)
 				{
 					// Fall back to old format
-					var match = new RegExp(", (.+)\/(.+);").exec(response.data.clips);
+					var match = new RegExp(", (.+)/(.+);").exec(response.data.clips);
 					if (match)
 					{
 						var used = getBytesFromBISizeStr(match[1]);
@@ -10883,6 +11804,12 @@ function StatusLoader()
 				UpdateScheduleStatus();
 				dropdownBoxes.listDefs["dbView"].rebuildItems();
 				serverTimeZoneOffsetMs = parseInt(parseFloat(response.data.tzone) * -60000);
+				if (response.data.time)
+				{
+					var requestDuration = requestEnd - requestStart;
+					var timeOfRequest = Date.now() - (requestDuration / 2);
+					currentServerTimeOffset = Math.round(parseInt(response.data.time) - timeOfRequest);
+				}
 			}
 			loadingHelper.SetLoadedStatus("status");
 			BI_CustomEvent.Invoke("StatusLoaded", response);
@@ -10931,56 +11858,76 @@ function StatusLoader()
 			cameraListLoader.LoadCameraList();
 		}, 5000);
 	}
+	this.getProfileDropdownHtml = function (profileNum)
+	{
+		var profileName;
+		if (currentProfileNames && currentProfileNames.length > profileNum)
+			profileName = currentProfileNames[profileNum];
+		if (profileNum === 0 && !profileName)
+			profileName = 'Inactive';
+		else if (!profileName)
+			profileName = "Profile " + profileNum;
+		if (profileNum === 0)
+			return getProfileDropdownHtml_Internal(profileNum, '#EEEEEE; background-color: #EE232C; padding: 0px 3px', profileName);
+		else if (profileNum === 1)
+			return getProfileDropdownHtml_Internal(profileNum, '#00FF00', profileName);
+		else if (profileNum === 2)
+			return getProfileDropdownHtml_Internal(profileNum, '#0097F0', profileName);
+		else if (profileNum === 3)
+			return getProfileDropdownHtml_Internal(profileNum, '#FF0000', profileName);
+		else if (profileNum === 4)
+			return getProfileDropdownHtml_Internal(profileNum, '#FFFF00', profileName);
+		else if (profileNum === 5)
+			return getProfileDropdownHtml_Internal(profileNum, '#FF8800', profileName);
+		else if (profileNum === 6)
+			return getProfileDropdownHtml_Internal(profileNum, '#FF00FF', profileName);
+		else if (profileNum === 7)
+			return getProfileDropdownHtml_Internal(profileNum, '#00FFFF', profileName);
+		else
+			return getProfileDropdownHtml_Internal(profileNum, '#FF0000', "Unknown Profile");
+	}
+	var getProfileDropdownHtml_Internal = function (profileNum, color, profileName)
+	{
+		return '<span style="color: ' + color + '; font-weight: bold;">' + profileNum + '</span>' + (profileName ? (' &nbsp; ' + htmlEncode(profileName)) : '');
+	}
 	var UpdateProfileStatus = function ()
 	{
 		if (lastResponse != null)
 		{
-			var selectedProfile = lastResponse.data.profile;
+			dropdownBoxes.setLabelText("profile", self.getProfileDropdownHtml(parseInt(lastResponse.data.profile)), true);
 			var schedule = lastResponse.data.schedule;
 			if (schedule == "")
 				schedule = "N/A";
 			var lock = lastResponse.data.lock;
-			$profileBtns.removeClass("selected");
-			$profileBtns.css("color", "");
-			var $selectedProfileBtn = $profileStatusBox.find('.profilebtn[profilenum="' + selectedProfile + '"]');
-			$selectedProfileBtn.addClass("selected");
-			$selectedProfileBtn.css("color", $selectedProfileBtn.attr("selColor"));
 			if (lock == 0)
 			{
 				$scheduleLockBtn.removeClass("hold");
 				$scheduleLockBtn.removeClass("temp");
-				$scheduleLockIcon.attr("href", "#svg_x5F_RunProfile");
-				$scheduleLockBtn.attr("title", 'Schedule "' + schedule + '" is active. Click to disable automatic scheduling.');
+				$scheduleLockIcon.attr("href", "#svg_x5F_Play");
+				$scheduleLockBtn.attr("title", 'Schedule "' + schedule + '" is active. Long press to disable automatic scheduling.');
 			}
 			else if (lock == 1)
 			{
 				$scheduleLockBtn.addClass("hold");
 				$scheduleLockBtn.removeClass("temp");
-				$scheduleLockIcon.attr("href", "#svg_x5F_HoldProfile");
+				$scheduleLockIcon.attr("href", "#svg_square");
 				$scheduleLockBtn.attr("title", 'Schedule "' + schedule + '" is currently disabled. Click to re-enable.');
 			}
 			else if (lock == 2)
 			{
 				$scheduleLockBtn.removeClass("hold");
 				$scheduleLockBtn.addClass("temp");
-				$scheduleLockIcon.attr("href", "#svg_x5F_TempProfile");
+				$scheduleLockIcon.attr("href", "#svg_x5F_Pause");
 				$scheduleLockBtn.attr("title", 'Schedule "' + schedule + '" is temporarily overridden. Click to resume schedule, or wait some hours and it should return to normal.');
 			}
 			else
 				toaster.Error("unexpected <b>lock</b> value from Blue Iris status");
 		}
-		if (currentProfileNames)
-			for (var i = 0; i < currentProfileNames.length; i++)
-			{
-				var tooltipText = currentProfileNames[i];
-				if (i == 0 && tooltipText == "Inactive")
-					tooltipText = "Inactive profile";
-				$profileStatusBox.find('.profilebtn[profilenum="' + i + '"]').attr("title", tooltipText);
-			}
 	}
 	this.SetCurrentProfileNames = function (newProfileNames)
 	{
 		currentProfileNames = newProfileNames;
+		dropdownBoxes.listDefs["profile"].rebuildItems();
 		UpdateProfileStatus();
 	}
 	this.GetProfileName = function (profileNum)
@@ -11023,9 +11970,20 @@ function StatusLoader()
 	this.SetProfileButtonsEnabled = function (enabled)
 	{
 		if (enabled)
-			$("#schedule_lock_button,.profilebtn").removeClass("disabled");
+		{
+			$scheduleLockBtn.removeClass("disabled");
+			$profileDropdown.removeClass("disabled");
+		}
 		else
-			$("#schedule_lock_button,.profilebtn").addClass("disabled");
+		{
+			$scheduleLockBtn.addClass("disabled");
+			$profileDropdown.addClass("disabled");
+		}
+		profileButtonsEnabled = enabled;
+	}
+	this.GetProfileButtonsEnabled = function ()
+	{
+		return profileButtonsEnabled;
 	}
 	this.SetStoplightButtonEnabled = function (enabled)
 	{
@@ -11034,18 +11992,22 @@ function StatusLoader()
 		else
 			$("#stoplightBtn").addClass("disabled");
 	}
-	$("#schedule_lock_button").click(function ()
-	{
-		if ($(this).hasClass("disabled"))
-			return;
-		loadStatusInternal(-1);
-	});
-	$(".profilebtn").click(function ()
-	{
-		if ($(this).hasClass("disabled"))
-			return;
-		loadStatusInternal($(this).attr("profilenum"));
-	});
+	$scheduleLockBtn.longpress(
+		function ()
+		{
+			if (!lastResponse || $scheduleLockBtn.hasClass("disabled"))
+				return;
+			loadStatusInternal(-1);
+		},
+		function ()
+		{
+			if (!lastResponse || $scheduleLockBtn.hasClass("disabled"))
+				return;
+			if (parseInt(lastResponse.data.lock) !== 0)
+				loadStatusInternal(-1);
+			else
+				toaster.Info("Long press to disable automatic scheduling.");
+		});
 	$("#stoplightBtn").click(function ()
 	{
 		if ($(this).hasClass("disabled"))
@@ -11520,7 +12482,7 @@ function SessionManager()
 	{
 		biSoundOptions = ["None"];
 		// Find the best format of each sound.
-		var formats = new Object(); // This object maps file names without extensions to the best format available.
+		var formats = new FasterObjectMap(); // This object maps file names without extensions to the best format available.
 		if (lastResponse && lastResponse.data)
 		{
 			var soundsArr = lastResponse.data.www_sounds;
@@ -11586,11 +12548,11 @@ function SessionManager()
 
 		if (permission_clips)
 		{
-			$("#topbar_tab_clips,#open_all_clips_btn,#open_alerts_btn").show();
+			$("#topbar_tab_clips,#topbar_tab_timeline,#open_all_clips_btn,#open_alerts_btn").show();
 		}
 		else
 		{
-			$("#topbar_tab_clips,#open_all_clips_btn,#open_alerts_btn").hide();
+			$("#topbar_tab_clips,#topbar_tab_timeline,#open_all_clips_btn,#open_alerts_btn").hide();
 			if (currentPrimaryTab != "live")
 				$("#topbar_tab_live").click();
 		}
@@ -11836,8 +12798,6 @@ function CameraListLoader()
 	var cameraListUpdateTimeout = null;
 	var webcastingWarning;
 	this.clearNewAlertsCounterOnNextLoad = false;
-	var dynamicGroupLayout = {};
-	var badRectsToast = new PersistentToast("badRectsToast", "ERROR");
 
 	var CallScheduler = function (successCallbackFunc)
 	{
@@ -11848,7 +12808,7 @@ function CameraListLoader()
 			var timeSinceLastLoad = performance.now() - lastLoadAt;
 			if (timeSinceLastLoad > 4500)
 				shouldDelay = false;
-			else if (AnyCameraTriggerOverlayIconsEnabled() || videoPlayer.PrioritizeTriggeredEnabled() || $("#campropdialog").length)
+			else if (AnyTimeSensitiveCameraStatusEffectsEnabled() || videoPlayer.PrioritizeTriggeredEnabled() || $("#campropdialog").length)
 				shouldDelay = false;
 			if (shouldDelay)
 				CallScheduler();
@@ -11891,6 +12851,7 @@ function CameraListLoader()
 				}
 				return;
 			}
+			var previousResponse = lastResponse;
 			lastResponse = response;
 			var numGroups = 0;
 			var numCameras = 0;
@@ -11900,9 +12861,12 @@ function CameraListLoader()
 			// See what we've got
 			for (var i = 0; i < lastResponse.data.length; i++)
 			{
-				if (typeof lastResponse.data[i].webcast === "undefined")
-					lastResponse.data[i].webcast = true;
-				allCameras[lastResponse.data[i].optionValue] = lastResponse.data[i];
+				var o = lastResponse.data[i];
+				if (typeof o.webcast === "undefined")
+					o.webcast = true;
+				if (typeof o.ptzdirect === "undefined" && o.ptz)
+					o.ptzdirect = true;
+				allCameras[o.optionValue] = o;
 			}
 			for (var i = 0; i < lastResponse.data.length; i++)
 			{
@@ -11983,17 +12947,50 @@ function CameraListLoader()
 			if (!firstCameraListLoaded
 				|| (self.GetCameraWithId(videoPlayer.Loading().image.id) == null
 					&& videoPlayer.Loading().image
-					&& videoPlayer.Loading().image.isLive)) // isLive check allows recordings to continue playing if their camera instance is missing
+					&& (videoPlayer.Loading().image.isLive
+						|| videoPlayer.Loading().image.isTimeline()))) // isLive/isTimeline check allows clips to continue playing if their camera instance is missing
 			{
-				if (self.GetGroupCamera(settings.ui3_defaultCameraGroupId) == null)
+				if (self.GetGroupCamera(settings.ui3_defaultCameraGroupId))
+					videoPlayer.SetCurrentlySelectedHomeGroupId(settings.ui3_defaultCameraGroupId);
+				else if (self.CameraIsGroup(lastResponse.data[0]))
+					videoPlayer.SetCurrentlySelectedHomeGroupId(lastResponse.data[0].optionValue);
+
+				var didLoadStream = false;
+				if (!firstCameraListLoaded)
 				{
-					if (self.CameraIsGroup(lastResponse.data[0]))
+					var cam;
+					if (mqttClient.preLoadVideoSpecified) // MQTT instruction takes precidence over URL parameter.
+					{
+						cam = self.GetCameraWithId(mqttClient.preLoadVideoSpecified);
+						if (cam)
+						{
+							videoPlayer.LoadLiveCamera(cam);
+							didLoadStream = videoPlayer.Loading().image.id === cam.optionValue;
+						}
+					}
+					if (!didLoadStream)
+					{
+						cam = UrlParameters.Get("cam", "c");
+						if (cam)
+						{
+							cam = self.GetCameraWithId(cam);
+							if (cam)
+							{
+								videoPlayer.LoadLiveCamera(cam);
+								didLoadStream = videoPlayer.Loading().image.id === cam.optionValue;
+							}
+						}
+					}
+				}
+				if (!didLoadStream)
+				{
+					if (self.GetGroupCamera(settings.ui3_defaultCameraGroupId))
+						videoPlayer.SelectCameraGroup(settings.ui3_defaultCameraGroupId);
+					else if (self.CameraIsGroup(lastResponse.data[0]))
 						videoPlayer.SelectCameraGroup(lastResponse.data[0].optionValue);
 					else
-						videoPlayer.LoadLiveCamera(lastResponse.data[0]);
+						videoPlayer.LoadLiveCamera(lastResponse.data[0], clipTimeline ? clipTimeline.getTimelineArgsForCameraSwitch() : null);
 				}
-				else
-					videoPlayer.SelectCameraGroup(settings.ui3_defaultCameraGroupId);
 			}
 			if (!firstCameraListLoaded)
 			{
@@ -12009,6 +13006,7 @@ function CameraListLoader()
 			{
 				toaster.Error(ex, 30000);
 			}
+			biSoundPlayer.PlayEventSounds(lastResponse, previousResponse);
 
 			BI_CustomEvent.Invoke("CameraListLoaded", lastResponse);
 			CallScheduler();
@@ -12042,129 +13040,66 @@ function CameraListLoader()
 		}
 		cams.splice(i, 0, fakeGroup);
 	}
-	this.AsyncLoadDynamicGroupRects = function (groupId, resolution)
+	this.GetGroupRects = function (groupId)
 	{
-		if (!resolution || !self.isDynamicLayoutEnabled(groupId))
-			return;
+		// Get from dynamic layout
+		var imgLoaded = videoPlayer.Loaded().image;
+		if (imgLoaded.id === groupId && imgLoaded.rects)
+			return ScaledRectsWorkaround(imgLoaded);
+
+		var imgLoading = videoPlayer.Loading().image;
+		if (imgLoading.id === groupId && imgLoading.rects)
+			return ScaledRectsWorkaround(imgLoading);
+
+		// Get from default layout
 		var cam = self.GetCameraWithId(groupId);
 		if (cam)
-		{
-			if (!self.CameraIsGroup(cam))
-				return;
-			var g = dynamicGroupLayout[groupId];
-			if (!g)
-				g = dynamicGroupLayout[groupId] = {};
-			if (g[resolution] === "pending")
-				return;
-			if (!g[resolution])
-				g[resolution] = "pending";
-			ExecJSON({ cmd: "ptz", camera: groupId }, function (response)
-			{
-				if (g[resolution] === "pending")
-					g[resolution] = null;
-				if (videoPlayer.Loading().image.id == groupId)
-				{
-					if (response.result === "success")
-					{
-						var rects = response.data.rects;
-						var cams = response.data.cams;
-						if (rects && cams && rects.length === cams.length)
-						{
-							g[resolution] = g["latest"] = { cams: cams, rects: rects };
-							BI_CustomEvent.Invoke("DynamicGroupLayoutLoaded");
-							badRectsToast.hide();
-						}
-						else
-						{
-							g[resolution] = null;
-							var cause = "missing";
-							if (rects || cams)
-								cause = "invalid";
-							var errMsg = 'Group layout metadata is ' + cause + ' for "' + groupId + '".';
-							console.log(errMsg, rects, cams);
-							badRectsToast.showText(errMsg + ' Probably a Blue Iris bug.');
-						}
-					}
-					else
-						toaster.Warning("Failed to load layout information for group: " + groupId + "<br/>" + JSON.stringify(response));
-				}
-			}, function (jqXHR, textStatus, errorThrown)
-			{
-				if (g[resolution] === "pending")
-					g[resolution] = null;
-				if (videoPlayer.Loading().image.id == groupId)
-					toaster.Warning("Failed to load layout information for group: " + groupId + "<br/>" + jqXHR.ErrorMessageHtml);
-			});
-		}
-		else
-			toaster.Warning("Failed to load group layout information for group that does not exist: " + groupId);
-	}
-	this.GetGroupRects = function (groupId, resolution)
-	{
-		var rects = self.GetDynamicGroupRects(groupId, resolution);
-		if (!rects)
-		{
-			var cam = self.GetCameraWithId(groupId);
-			if (cam)
-				rects = cam.rects;
-		}
-		return rects;
-	}
-	this.GetDynamicGroupRects = function (groupId, resolution)
-	{
-		if (self.isDynamicLayoutEnabled(groupId))
-		{
-			if (!resolution)
-			{
-				var loadedImg = videoPlayer.Loaded().image;
-				if (loadedImg.id === groupId)
-					resolution = loadedImg.actualwidth + "x" + loadedImg.actualheight;
-			}
-			if (resolution)
-			{
-				var g = dynamicGroupLayout[groupId];
-				if (g)
-				{
-					var d = g[resolution];
-					if (d && d !== "pending")
-						return d.rects;
-				}
-			}
-		}
+			return cam.rects;
 		return null;
 	}
-	this.GetGroupCams = function (groupId, resolution)
+	function ScaledRectsWorkaround(image)
 	{
-		var cams = self.GetDynamicGroupCams(groupId, resolution);
-		if (!cams)
+		// Last noted in BI 5.5.6.2:
+		// H.264 group streams
+		//  * Dynamic Layout: scaled reclist 
+		//  * Static Layout: scaled reclist
+		// JPEG group streams
+		//  * Dynamic Layout: scaled reclist 
+		//  * Static Layout: unscaled reclist
+		// To work around this inconsistency, this method will unscale the static layout reclist for static layout h264 group streams..
+
+		if (image.rects && videoPlayer.CurrentPlayerModuleName() === "h264" && !cameraListLoader.isDynamicLayoutEnabled(image.id))
 		{
-			var cam = self.GetCameraWithId(groupId);
-			if (cam)
-				cams = cam.group;
+			var rects = new Array(image.rects.length);
+			var nativeRes = image.getFullRect();
+			var actualRes = image.getActualRect();
+			var scaleX = nativeRes.w / actualRes.w;
+			var scaleY = nativeRes.h / actualRes.h;
+			var scale = (scaleX + scaleY) / 2;
+			for (var i = 0; i < rects.length; i++)
+			{
+				var r = image.rects[i];
+				rects[i] = [r[0] * scale, r[1] * scale, r[2] * scale, r[3] * scale];
+			}
+			return rects;
 		}
-		return cams;
+		return image.rects;
 	}
-	this.GetDynamicGroupCams = function (groupId, resolution)
+	this.GetGroupCams = function (groupId)
 	{
-		if (self.isDynamicLayoutEnabled(groupId))
-		{
-			if (!resolution)
-			{
-				var loadedImg = videoPlayer.Loaded().image;
-				if (loadedImg.id === groupId)
-					resolution = loadedImg.actualwidth + "x" + loadedImg.actualheight;
-			}
-			if (resolution)
-			{
-				var g = dynamicGroupLayout[groupId];
-				if (g)
-				{
-					var d = g[resolution];
-					if (d && d !== "pending")
-						return d.cams;
-				}
-			}
-		}
+		// Get from dynamic layout
+		var imgLoaded = videoPlayer.Loaded().image;
+		if (imgLoaded.id === groupId && imgLoaded.cams)
+			return imgLoaded.cams;
+
+		var imgLoading = videoPlayer.Loading().image;
+		if (imgLoading.id === groupId && imgLoading.cams)
+			return imgLoading.cams;
+
+		// Get from default layout
+		var cam = self.GetCameraWithId(groupId);
+		if (cam)
+			return cam.group;
 		return null;
 	}
 	this.isDynamicLayoutEligible = function (groupId)
@@ -12183,20 +13118,20 @@ function CameraListLoader()
 		}
 		return false;
 	}
-	this.isDynamicLayoutEnabled = function (groupId, ignoreViewportSize)
+	this.isDynamicLayoutEnabled = function (groupId)
 	{
 		var cam = self.GetCameraWithId(groupId);
-		return cam && self.isDynamicLayoutEligible(groupId) && settings.ui3_dynamicGroupLayout === "1" && (ignoreViewportSize || imageRenderer.ViewportCanSupportDynamicGroupLayout());
+		return cam && self.isDynamicLayoutEligible(groupId) && settings.ui3_dynamicGroupLayout === "1";
 	}
 	this.HideWebcastingWarning = function ()
 	{
 		if (webcastingWarning)
 			webcastingWarning.remove();
 	}
-	this.GetCameraBoundsInCurrentGroupImageScaled = function (cameraId, groupId, resolution)
+	this.GetCameraBoundsInCurrentGroupImageScaled = function (cameraId, groupId)
 	{
 		var coordScale = self.isDynamicLayoutEnabled(groupId) ? 1 : (videoPlayer.Loaded().image.actualwidth / videoPlayer.Loaded().image.fullwidth);
-		var unscaled = self.GetCameraBoundsInCurrentGroupImageUnscaled(cameraId, groupId, resolution);
+		var unscaled = self.GetCameraBoundsInCurrentGroupImageUnscaled(cameraId, groupId);
 		if (unscaled == null)
 			return null;
 		// The first line of the array definition must be on the same line as the return statement
@@ -12205,15 +13140,12 @@ function CameraListLoader()
 			, Math.round(unscaled[2] * coordScale)
 			, Math.round(unscaled[3] * coordScale)];
 	}
-	this.GetCameraBoundsInCurrentGroupImageUnscaled = function (cameraId, groupId, resolution)
+	this.GetCameraBoundsInCurrentGroupImageUnscaled = function (cameraId, groupId)
 	{
-		var camData = self.GetCameraWithId(groupId);
-		var cams = self.GetGroupCams(groupId, resolution);
+		var cams = self.GetGroupCams(groupId);
 		if (cams)
 		{
-			var rects = self.GetGroupRects(groupId, resolution);
-			if (!rects)
-				rects = camData.rects;
+			var rects = self.GetGroupRects(groupId);
 			if (rects)
 				for (var j = 0; j < rects.length; j++)
 					if (cams[j] == cameraId)
@@ -12230,7 +13162,7 @@ function CameraListLoader()
 		var cameraIdLower = cameraId.toLowerCase();
 		for (var id in cameraIdToCameraMap)
 		{
-			if (id.toLowerCase() === cameraIdLower && cameraIdToCameraMap.hasOwnProperty(id))
+			if (id.toLowerCase() === cameraIdLower && Object.prototype.hasOwnProperty.call(cameraIdToCameraMap, id))
 				return cameraIdToCameraMap[id];
 		}
 		return null;
@@ -12432,12 +13364,12 @@ function VideoPlayerController()
 		if (!playerModule)
 			toaster.Error("Video Player was asked to load module \"" + moduleName + "\" which does not exist.", 30000);
 		else if (refreshVideoNow)
-			playerModule.OpenVideo(currentlyLoadingImage, position, paused);
+			playerModule.OpenVideo(currentlyLoadingImage.UpdateTimelineStart(), position, paused);
 	}
 	this.RefreshVideoStream = function ()
 	{
 		if (playerModule)
-			playerModule.OpenVideo(currentlyLoadingImage, playerModule.GetSeekPercent(), playerModule.Playback_IsPaused());
+			playerModule.OpenVideo(currentlyLoadingImage.UpdateTimelineStart(), playerModule.GetSeekPercent(), playerModule.Playback_IsPaused());
 	}
 	this.PreLoadPlayerModules = function ()
 	{
@@ -12462,7 +13394,7 @@ function VideoPlayerController()
 	 */
 	this.GetPlayerObject = function ()
 	{
-		if (typeof playerModule.GetPlayerObject === "function")
+		if (playerModule && typeof playerModule.GetPlayerObject === "function")
 			return playerModule.GetPlayerObject();
 		return null;
 	}
@@ -12501,9 +13433,9 @@ function VideoPlayerController()
 			, function (e, confirmed) // Single Click
 			{
 				videoOverlayHelper.HideFalseLoadingOverlay();
-				if (currentlyLoadingImage.isLive)
+				if (currentlyLoadingImage.isLive || currentlyLoadingImage.isTimeline())
 				{
-					// Live View
+					// Live View or Timeline
 					if (IsDoubleClickFullscreenEnabled())
 					{
 						if (confirmed)
@@ -12536,7 +13468,7 @@ function VideoPlayerController()
 				if (!IsDoubleClickFullscreenEnabled())
 					return;
 				videoOverlayHelper.HideFalseLoadingOverlay();
-				if (currentlyLoadingImage.isLive)
+				if (currentlyLoadingImage.isLive || currentlyLoadingImage.isTimeline())
 				{
 					fullScreenModeController.toggleFullScreen();
 				}
@@ -12550,6 +13482,8 @@ function VideoPlayerController()
 			, imageRenderer.CamImgDragMove
 			, imageRenderer.CamImgDragEnd
 		);
+
+		$("#prioritizeTriggeredButton").longpress(self.PrioritizeTriggeredToggle, self.PrioritizeTriggeredClick);
 
 		BI_CustomEvent.AddListener("CameraListLoaded", UpdatedCurrentCameraData);
 		BI_CustomEvent.AddListener("OpenVideo", OnOpenVideo);
@@ -12617,7 +13551,12 @@ function VideoPlayerController()
 	{
 		if (camData && camData.isEnabled && camData.active && camData.webcast)
 		{
-			if (settings.ui3_prioritizeTriggered_triggerMode === "Trigger")
+			if (settings.ui3_prioritizeTriggered_triggerMode === "Alert")
+			{
+				if (camData.isAlerting)
+					return true;
+			}
+			else if (settings.ui3_prioritizeTriggered_triggerMode === "Trigger")
 			{
 				if (camData.isTriggered)
 					return true;
@@ -12644,10 +13583,10 @@ function VideoPlayerController()
 	{
 		if (settings.ui3_doubleClick_behavior === "Both")
 			return true;
-		if (currentlyLoadingImage.isLive)
-			return settings.ui3_doubleClick_behavior === "Live View"
+		if (currentlyLoadingImage.isLive || currentlyLoadingImage.isTimeline())
+			return settings.ui3_doubleClick_behavior === "Live View";
 		else
-			return settings.ui3_doubleClick_behavior === "Recordings"
+			return settings.ui3_doubleClick_behavior === "Recordings";
 	}
 	// Methods for querying what is currently playing
 	this.Loading = function ()
@@ -12660,6 +13599,8 @@ function VideoPlayerController()
 	}
 	this.GetExpectedFrameIntervalOfCurrentCamera = function ()
 	{
+		if (currentlyLoadingImage.isTimeline() && currentlyLoadingImage.isGroup)
+			return 1000 / 30; // Timeline groups are at 30 FPS as of 2022-03.
 		if (typeof currentlyLoadingCamera.FPS === "number")
 			return 1000 / currentlyLoadingCamera.FPS;
 		else
@@ -12671,13 +13612,13 @@ function VideoPlayerController()
 	}
 	this.GetClipPlaybackPositionPercent = function ()
 	{
-		if (currentlyLoadingImage.isLive)
+		if (currentlyLoadingImage.isLive || currentlyLoadingImage.isTimeline())
 			return 0;
 		return playerModule.GetSeekPercent();
 	}
 	this.GetClipPlaybackPositionMs = function ()
 	{
-		if (currentlyLoadingImage.isLive)
+		if (currentlyLoadingImage.isLive || currentlyLoadingImage.isTimeline())
 			return 0;
 		return playerModule.GetClipPlaybackPositionMs();
 	}
@@ -12701,11 +13642,7 @@ function VideoPlayerController()
 	}
 	this.Playback_IsPaused = function ()
 	{
-		return playerModule.Playback_IsPaused();
-	}
-	this.GetCurrentImageTimeMs = function ()
-	{
-		return playerModule.GetCurrentImageTimeMs();
+		return !playerModule || playerModule.Playback_IsPaused();
 	}
 	/**
 	 * Returns the number of milliseconds that have passed since the most recent stream was started.
@@ -12757,7 +13694,7 @@ function VideoPlayerController()
 	var DoThingIfImgClickEligible = function (event, thing)
 	{
 		/// <summary>A silly method that does all the validation and clicked-camera identification from the ImgClick function, then calls a callback method.</summary>
-		if (!currentlyLoadingImage.isLive)
+		if (!currentlyLoadingImage.isLive && !currentlyLoadingImage.isTimeline())
 			return;
 		// mouseCoordFixer.fix(event); // Don't call this more than once per event!
 		var camData = self.GetCameraUnderMousePointer(event);
@@ -12793,7 +13730,7 @@ function VideoPlayerController()
 				return;
 			if (scaleOut && playerModule.DrawFullCameraAsThumb)
 				playerModule.DrawFullCameraAsThumb(currentlyLoadedImage.id, camData.optionValue);
-			self.LoadLiveCamera(camData);
+			self.LoadLiveCamera(camData, clipTimeline.getTimelineArgsForCameraSwitch());
 			if (scaleOut && playerModule.DrawFullCameraAsThumb)
 				self.CameraOrResolutionChange();
 		}
@@ -12804,9 +13741,9 @@ function VideoPlayerController()
 			{
 				var loadedImg = videoPlayer.Loaded().image;
 				if (loadedImg.id)
-					playerModule.DrawThumbAsFullCamera(camData.optionValue, loadedImg.id, loadedImg.actualwidth + "x" + loadedImg.actualheight);
+					playerModule.DrawThumbAsFullCamera(camData.optionValue, loadedImg.id);
 			}
-			self.LoadLiveCamera(camData);
+			self.LoadLiveCamera(camData, clipTimeline.getTimelineArgsForCameraSwitch());
 			if (playerModule.DrawThumbAsFullCamera)
 				self.CameraOrResolutionChange();
 		}
@@ -12826,7 +13763,29 @@ function VideoPlayerController()
 		}
 		else
 		{
-			self.LoadHomeGroup();
+			self.LoadLiveCamera(cameraListLoader.GetGroupCamera(currentlySelectedHomeGroupId));
+		}
+	}
+	this.openTimelineAt = function (timelineMs)
+	{
+		if (currentlyLoadingImage == null || currentlyLoadingImage.isLive)
+			return;
+		if (currentPrimaryTab !== "timeline")
+			$('.topbar_tab[name="timeline"]').click();
+		if (!timelineMs)
+			timelineMs = videoPlayer.lastFrameUtc;
+		var timelineArgs = clipTimeline.getTimelineArgsForCameraSwitch();
+		if (!timelineArgs)
+			timelineArgs = { timelineMs: timelineMs, startPaused: videoPlayer.Playback_IsPaused() && !clipTimeline.timelineDidPauseVideo() };
+		timelineArgs.timelineMs = timelineMs;
+		var camData = cameraListLoader.GetCameraWithId(lastLiveCameraOrGroupId);
+		if (camData && camData.isEnabled && camData.webcast)
+		{
+			self.LoadLiveCamera(camData, timelineArgs);
+		}
+		else
+		{
+			self.LoadLiveCamera(cameraListLoader.GetGroupCamera(currentlySelectedHomeGroupId), timelineArgs);
 		}
 	}
 	this.isLive = function ()
@@ -12851,7 +13810,7 @@ function VideoPlayerController()
 	{
 		if (typeof groupId == "undefined")
 			groupId = currentlySelectedHomeGroupId;
-		self.LoadLiveCamera(cameraListLoader.GetGroupCamera(groupId));
+		self.LoadLiveCamera(cameraListLoader.GetGroupCamera(groupId), clipTimeline.getTimelineArgsForCameraSwitch());
 	}
 	this.LoadFirstAvailableCameraGroup = function ()
 	{
@@ -12875,27 +13834,46 @@ function VideoPlayerController()
 			{
 				if (cameraListLoader.CameraIsGroupOrCycle(camList.data[i]))
 				{
-					settings.ui3_defaultCameraGroupId = currentlySelectedHomeGroupId = groupId;
-
-					self.LoadLiveCamera(camList.data[i]);
+					self.SetCurrentlySelectedHomeGroupId(groupId);
+					self.LoadLiveCamera(camList.data[i], clipTimeline.getTimelineArgsForCameraSwitch());
 					break;
 				}
 			}
 		}
 	}
-	this.LoadLiveCamera = function (camData)
+	this.SetCurrentlySelectedHomeGroupId = function (id)
+	{
+		settings.ui3_defaultCameraGroupId = currentlySelectedHomeGroupId = id;
+	}
+	this.LoadLiveCamera = function (camData, timelineArgs)
 	{
 		if (camData == null)
 		{
 			toaster.Error("The target camera or group could not be found.");
 			return;
 		}
+		if (timelineArgs)
+		{
+			if (typeof timelineArgs.timelineMs === "number")
+				timelineArgs.timelineMs = clipTimeline.BoundsCheckTimelineMs(timelineArgs.timelineMs);
+			if (typeof timelineArgs.timelineMs !== "number")
+				timelineArgs = {}; // Nothing else matters if timelineMs is not defined.
+		}
+		timelineArgs = $.extend({
+			timelineMs: undefined,
+			timelineJump: undefined,
+			startPaused: false
+		}, timelineArgs);
+
 		if ((!camData.isEnabled || !camData.webcast) && !cameraListLoader.CameraIsGroupOrCycle(camData))
 		{
-			console.log("LoadLiveCamera will not try to load " + camData.optionValue + ".", "Enabled: " + camData.isEnabled, "Webcast: " + camData.webcast, "IsGroupOrCycle: " + cameraListLoader.CameraIsGroupOrCycle(camData));
-			if (!camData.webcast)
-				toaster.Warning("The camera you clicked has webcasting disabled. Enable it in Blue Iris Camera Properties > Webcast tab.", 15000);
-			return;
+			if (currentPrimaryTab !== "timeline")
+			{
+				console.log("LoadLiveCamera will not try to load " + camData.optionValue + ".", "Enabled: " + camData.isEnabled, "Webcast: " + camData.webcast, "IsGroupOrCycle: " + cameraListLoader.CameraIsGroupOrCycle(camData));
+				if (!camData.webcast)
+					toaster.Warning("The camera you clicked has webcasting disabled. Enable it in Blue Iris Camera Properties > Webcast tab.", 15000);
+				return;
+			}
 		}
 		if (cameraListLoader.singleCameraGroupMap[camData.optionValue])
 		{
@@ -12904,33 +13882,41 @@ function VideoPlayerController()
 				camData = maybeCamData;
 		}
 
-		imageRenderer.zoomHandler.ZoomToFit();
 		var cli = currentlyLoadingImage;
 		var clc = currentlyLoadingCamera = camData;
+		var previousId = cli.id;
 		cli.id = clc.optionValue;
 		cli.fullwidth = cli.actualwidth = clc.width;
 		cli.fullheight = cli.actualheight = clc.height;
-		cli.aspectratio = clc.width / clc.height;
 		cli.path = clc.optionValue;
 		cli.uniqueId = clc.optionValue;
-		cli.isLive = true;
+		cli.isLive = typeof timelineArgs.timelineMs !== "number";
+		cli.timelineStart = timelineArgs.timelineMs;
+		cli.timelineJump = timelineArgs.timelineJump;
 		cli.ptz = clc.ptz;
 		cli.audio = clc.audio;
 		cli.msec = -1;
 		cli.isGroup = clc.group ? true : false;
+		if (previousId !== cli.id)
+		{
+			cli.cams = null;
+			cli.rects = null;
+		}
 
 		lastLiveCameraOrGroupId = clc.optionValue;
 
 		playbackControls.Live();
 		ptzButtons.UpdatePtzControlDisplayState();
+		relativePTZ.disable3dPositioning();
 		dropdownBoxes.setLabelText("currentGroup", CleanUpGroupName(clc.optionDisplay));
 
 		if (clipLoader.GetCurrentFilteredCamera() !== cli.id)
-			clipLoader.LoadClips(); // This method does nothing if not on the clips/alerts tabs.
+			clipLoader.LoadClips(); // This method does not waste resources if not on the clips tab.
 
 		videoOverlayHelper.ShowLoadingOverlay(true);
+		var startPaused = timelineArgs.startPaused;
 		if (playerModule)
-			playerModule.OpenVideo(cli, 0, false);
+			playerModule.OpenVideo(cli, 0, startPaused);
 
 		fullScreenModeController.updateFullScreenButtonState();
 
@@ -12939,7 +13925,7 @@ function VideoPlayerController()
 	this.LoadClip = function (clipData)
 	{
 		var fileTypeInfo = clipLoader.GetClipFileTypeInfo(clipData);
-		if ((clipData.flags & clip_flag_is_recording) > 0 && !fileTypeInfo.isBVR)
+		if ((clipData.flags & BIDBFLAG_RECORDING) > 0 && !fileTypeInfo.isBVR)
 		{
 			toaster.Info("Unable to open this " + (clipData.isClip ? "clip" : "alert") + " because the clip is still recording and the file type is not bvr.");
 			return;
@@ -12952,7 +13938,6 @@ function VideoPlayerController()
 			cam = cameraListLoader.MakeFakeCamBasedOnClip(clipData);
 		if (cam)
 		{
-			imageRenderer.zoomHandler.ZoomToFit();
 			var cli = currentlyLoadingImage;
 			var clc = currentlyLoadingCamera = cam;
 			cli.id = clc.optionValue;
@@ -12964,14 +13949,16 @@ function VideoPlayerController()
 				cli.fullwidth = clipRes.width;
 				cli.fullheight = clipRes.height;
 			}
-			cli.aspectratio = clc.width / clc.height;
 			cli.path = clipData.path;
 			cli.uniqueId = clipData.recId;
 			cli.isLive = false;
+			cli.timelineStart = false;
 			cli.ptz = false;
 			cli.audio = clipData.audio || (!clipData.isClip && cli.audio); // Alerts never have the audio flag set.
 			cli.msec = parseInt(clipData.msec);
 			cli.isGroup = false;
+			cli.cams = null;
+			cli.rects = null;
 
 			playbackHeader.SetClipName(clipData);
 			playbackControls.Recording(clipData);
@@ -12993,24 +13980,76 @@ function VideoPlayerController()
 
 		fullScreenModeController.updateFullScreenButtonState();
 	}
-
+	this.TimelineJump = function (direction)
+	{
+		if (!currentlyLoadingImage.isTimeline())
+			return;
+		direction = (direction > 0 ? 1 : -1);
+		if (self.Playback_IsPaused())
+		{
+			var args = clipTimeline.getTimelineArgsForCameraSwitch();
+			args.timelineJump = direction;
+			self.LoadLiveCamera(currentlyLoadingCamera, args);
+		}
+		else
+			self.TimelineSet("&jump=" + direction);
+	}
+	this.TimelineSeek = function (pos)
+	{
+		if (self.lastFrameUtc === pos)
+			return;
+		self.lastFrameUtc = pos;
+		var speedArg = "&speed=" + Math.round(100 * playbackControls.GetPlaybackSpeed());
+		self.TimelineSet(speedArg + "&pos=" + parseInt(pos));
+	}
+	/** Instructs Blue Iris to stop the current timeline stream. Useful only for Jpeg streams. */
+	this.TimelineStop = function ()
+	{
+		self.TimelineSet("&speed=0");
+	}
+	this.TimelineSet = function (urlParams)
+	{
+		if (!currentlyLoadingImage.isTimeline())
+			return;
+		timelineSync.run(this, function ()
+		{
+			var url = currentServer.remoteBaseURL + "time/set" + currentServer.GetAPISessionArg("?", true) + '&opaque=' + ui3InstanceId + urlParams;
+			$.ajax(url)
+				.fail(function (jqXHR, textStatus, errorThrown)
+				{
+					if (jqXHR && jqXHR.status !== 0)
+						toaster.Error("Blue Iris failed to modify the timeline video stream. HTTP " + jqXHR.status + " " + jqXHR.statusText);
+					else
+						toaster.Error("Unable to contact Blue Iris to modify the timeline video stream.");
+				})
+				.always(function ()
+				{
+					timelineSync.unlock();
+				});
+		});
+	}
 	this.SeekToPercent = function (pos, play)
 	{
 		pos = Clamp(pos, 0, 1);
 		seekBar.drawSeekbarAtPercent(pos);
-		playerModule.OpenVideo(currentlyLoadingImage, pos, !play);
+		playerModule.OpenVideo(currentlyLoadingImage.UpdateTimelineStart(), pos, !play);
 	}
 	this.SeekByMs = function (offset, play)
 	{
-		var msLength = currentlyLoadingImage.msec - 1;
-		if (msLength <= 0)
-			return;
-		var currentMs = playerModule.GetSeekPercent() * msLength;
-		var newPos = (currentMs + offset) / msLength;
-		newPos = Clamp(newPos, 0, 1);
-		if (typeof play == "undefined")
-			play = !playerModule.Playback_IsPaused();
-		self.SeekToPercent(newPos, play);
+		if (currentlyLoadingImage.isTimeline())
+			clipTimeline.seekTo(videoPlayer.lastFrameUtc + offset);
+		else
+		{
+			var msLength = currentlyLoadingImage.msec - 1;
+			if (msLength <= 0)
+				return;
+			var currentMs = playerModule.GetSeekPercent() * msLength;
+			var newPos = (currentMs + offset) / msLength;
+			newPos = Clamp(newPos, 0, 1);
+			if (typeof play == "undefined")
+				play = !playerModule.Playback_IsPaused();
+			self.SeekToPercent(newPos, play);
+		}
 	}
 	this.AudioToggleNotify = function (audioEnabled)
 	{
@@ -13035,39 +14074,49 @@ function VideoPlayerController()
 	}
 	this.Playback_NextClip = function ()
 	{
-		var clipEle = clipLoader.GetCurrentClipEle();
-		if (clipEle && clipLoader.GetAllSelected().length <= 1)
+		if (videoPlayer.Loading().image.isTimeline())
+			videoPlayer.TimelineJump(1);
+		else
 		{
-			if (clipLoader.GetAllSelected().length === 0 || clipLoader.IsClipSelected(clipEle.id.substr(1)))
+			var clipEle = clipLoader.GetCurrentClipEle();
+			if (clipEle && clipLoader.GetAllSelected().length <= 1)
 			{
-				var $clip;
-				if (settings.ui3_clip_navigation_direction === "Oldest First")
-					$clip = clipLoader.GetClipAboveClip($(clipEle));
-				else
-					$clip = clipLoader.GetClipBelowClip($(clipEle));
-				if (Playback_ClipObj($clip))
-					return;
+				if (clipLoader.GetAllSelected().length === 0 || clipLoader.IsClipSelected(clipEle.id.substr(1)))
+				{
+					var $clip;
+					if (settings.ui3_clip_navigation_direction === "Oldest First")
+						$clip = clipLoader.GetClipAboveClip($(clipEle));
+					else
+						$clip = clipLoader.GetClipBelowClip($(clipEle));
+					if (Playback_ClipObj($clip))
+						return;
+				}
 			}
+			self.Playback_Pause();
 		}
-		self.Playback_Pause();
 	}
 	this.Playback_PreviousClip = function ()
 	{
-		var clipEle = clipLoader.GetCurrentClipEle();
-		if (clipEle && clipLoader.GetAllSelected().length <= 1)
+		if (videoPlayer.Loading().image.isTimeline())
+			videoPlayer.TimelineJump(-1);
+		else
 		{
-			if (clipLoader.GetAllSelected().length === 0 || clipLoader.IsClipSelected(clipEle.id.substr(1)))
+			var clipEle = clipLoader.GetCurrentClipEle();
+			if (clipEle && clipLoader.GetAllSelected().length <= 1)
 			{
-				var $clip;
-				if (settings.ui3_clip_navigation_direction === "Oldest First")
-					$clip = clipLoader.GetClipBelowClip($(clipEle));
-				else
-					$clip = clipLoader.GetClipAboveClip($(clipEle));
-				if (Playback_ClipObj($clip))
-					return;
+				if (clipLoader.GetAllSelected().length === 0 || clipLoader.IsClipSelected(clipEle.id.substr(1)))
+				{
+					var $clip;
+					if (settings.ui3_clip_navigation_direction === "Oldest First")
+						$clip = clipLoader.GetClipBelowClip($(clipEle));
+					else
+						$clip = clipLoader.GetClipAboveClip($(clipEle));
+					if (Playback_ClipObj($clip))
+						return;
+				}
 			}
+			self.Playback_Pause();
 		}
-		self.Playback_Pause();
 	}
 	var Playback_ClipObj = function ($clip)
 	{
@@ -13127,66 +14176,86 @@ function VideoPlayerController()
 	// Callback methods for a player module to inform the VideoPlayerController of state changes.
 	this.CameraOrResolutionChange = function ()
 	{
-		imageRenderer.zoomHandler.ZoomToFit();
+		var idChanged = currentlyLoadedImage.uniqueId !== currentlyLoadingImage.uniqueId;
+		var wasZoomedToFit = imageRenderer.zoomHandler.IsZoomedToFit();
 		currentlyLoadedImage.CopyValuesFrom(currentlyLoadingImage);
 		currentlyLoadedCamera = currentlyLoadingCamera;
+		if (idChanged || wasZoomedToFit)
+			imageRenderer.zoomHandler.ZoomToFit();
 		resized();
 	}
-	var lastCycleWidth = 0;
-	var lastCycleHeight = 0;
-	this.ImageRendered = function (uniqueId, width, height, lastFrameLoadingTime, lastFrameDate)
+	this.notifyImageLoading = function (loading, sizeToRequest)
 	{
+		loading.reqwidth = sizeToRequest.w;
+		loading.reqheight = sizeToRequest.h;
+		if (loading.id === currentlyLoadingImage.id)
+		{
+			currentlyLoadingImage.reqwidth = loading.reqwidth;
+			currentlyLoadingImage.reqheight = loading.reqheight;
+		}
+	}
+	this.lastFrameUtc = 0;
+	this.ImageRendered = function (properties)
+	{
+		if (properties.id !== currentlyLoadingImage.uniqueId)
+		{
+			console.log("ImageRendered called for wrong video source.", properties.id, properties, "Currently loading: " + currentlyLoadingImage.id);
+			return;
+		}
 		jpegPreviewModule.Hide();
-		if (currentlyLoadedImage.uniqueId != uniqueId)
+
+		var imageSizeIsChanging = currentlyLoadingImage.actualwidth !== properties.w || currentlyLoadingImage.actualheight !== properties.h;
+
+		currentlyLoadingImage.actualwidth = properties.w;
+		currentlyLoadingImage.actualheight = properties.h;
+
+		if (imageSizeIsChanging || currentlyLoadedImage.uniqueId != properties.id || currentlyLoadingImage.isTimeline() !== currentlyLoadedImage.isTimeline())
 			self.CameraOrResolutionChange();
-		else if (currentlyLoadingImage.isLive && uniqueId.startsWith("@"))
-		{
-			if (lastCycleWidth != width || lastCycleHeight != height)
-			{
-				lastCycleWidth = width;
-				lastCycleHeight = height;
-				currentlyLoadedImage.aspectratio = lastCycleWidth / lastCycleHeight;
-				resized();
-			}
-		}
-		else
-		{
-			lastCycleWidth = lastCycleHeight = 0;
-		}
-
-		var imageSizeIsChanging = currentlyLoadedImage.actualwidth !== width || currentlyLoadedImage.actualheight !== height;
-
-		// actualwidth and actualheight must be set after [CameraOrResolutionChange]
-		currentlyLoadedImage.actualwidth = width;
-		currentlyLoadedImage.actualheight = height;
 
 		if (imageSizeIsChanging)
 			imageRenderer.ImgResized(false);
 
-		RefreshFps(lastFrameLoadingTime);
+		RefreshFps(properties.loadingTime);
 
-		if (currentlyLoadingImage.isLive && lastFrameDate)
+		if (typeof properties.utc === "number")
 		{
-			var str = "";
-			var w = $layoutbody.width();
-			if (w < 240)
-				str = "LIVE";
-			else if (w < 325)
-				str = "LIVE: " + GetTimeStr(GetServerDate(lastFrameDate));
-			else
-				str = "LIVE: " + GetDateStr(GetServerDate(lastFrameDate));
-			playbackControls.SetProgressText(str);
+			self.lastFrameUtc = properties.utc;
+			if (currentlyLoadingImage.isLive)
+			{
+				var str = "";
+				var w = $layoutbody.width();
+				if (w < 240)
+					str = "LIVE";
+				else if (w < 325)
+					str = "LIVE: " + GetTimeStr(GetServerDate(new Date(properties.utc)));
+				else
+					str = "LIVE: " + GetDateStr(GetServerDate(new Date(properties.utc)));
+				playbackControls.SetProgressText(str);
+			}
+			else if (currentlyLoadingImage.isTimeline())
+			{
+				var str = GetDateStr(GetServerDate(new Date(properties.utc)));
+				playbackControls.SetProgressText(str);
+			}
 		}
 
-		if (currentlyLoadingImage.uniqueId != uniqueId)
+		if (currentlyLoadingImage.uniqueId != properties.id)
 			return;
 
-		if (!currentlyLoadedImage.isLive)
+		if (!currentlyLoadedImage.isLive && !currentlyLoadedImage.isTimeline())
 			seekBar.drawSeekbarAtPercent(playerModule.GetSeekPercent());
 		videoOverlayHelper.HideLoadingOverlay();
 
 		mediaSessionController.setMediaState();
+
+		BI_CustomEvent.Invoke("ImageRendered", properties);
+		if (properties.isFirstFrame)
+			BI_CustomEvent.Invoke("FirstFrameLoaded");
 	}
+	/**
+	 * Called when clip playback ends. Not called for live or timeline video.
+	 * @param {any} isLeftBoundary Playback ended at the start of the clip.
+	 */
 	this.Playback_Ended = function (isLeftBoundary)
 	{
 		// The module may call this repeatedly 
@@ -13242,9 +14311,22 @@ function VideoPlayerController()
 	{
 		return settings.ui3_prioritizeTriggered === "1";
 	}
+	this.PrioritizeTriggeredClick = function ()
+	{
+		toaster.Info("Long press to toggle Auto-Maximize.");
+	}
 	this.PrioritizeTriggeredToggle = function ()
 	{
-		settings.ui3_prioritizeTriggered = self.PrioritizeTriggeredEnabled() ? "0" : "1";
+		if (self.PrioritizeTriggeredEnabled())
+		{
+			settings.ui3_prioritizeTriggered = "0";
+			toaster.Success("Auto-Maximize is disabled.");
+		}
+		else
+		{
+			settings.ui3_prioritizeTriggered = "1";
+			toaster.Success("Auto-Maximize is enabled upon " + settings.ui3_prioritizeTriggered_triggerMode + ". Configure feature at UI Settings > Video Player.");
+		}
 		self.PrioritizeTriggeredWasToggled();
 	}
 	this.PrioritizeTriggeredWasToggled = function ()
@@ -13255,99 +14337,228 @@ function VideoPlayerController()
 	var setPrioritizeTriggeredButtonState = function ()
 	{
 		if (self.PrioritizeTriggeredEnabled())
-			$("#prioritizeTriggeredButton").addClass("on");
+			$(".prioritizeTriggeredButton").addClass("on");
 		else
-			$("#prioritizeTriggeredButton").removeClass("on");
+			$(".prioritizeTriggeredButton").removeClass("on");
+	}
+	this.GroupLayoutMetadataReceived = function (camId, xCamList, xRecList)
+	{
+		if (!xCamList || !xRecList)
+			return;
+		try
+		{
+			xCamList = UTF8Fix(xCamList);
+			var cams = xCamList ? JSON.parse('[' + xCamList + ']') : null;
+			var rects = xRecList ? JSON.parse('[' + xRecList + ']') : null;
+			if (!cams.length || !rects.length)
+				return;
+			if (currentlyLoadingImage.id === camId)
+			{
+				var oldSerialized = JSON.stringify(currentlyLoadingImage.cams) + JSON.stringify(currentlyLoadingImage.rects);
+				var newSerialized = JSON.stringify(cams) + JSON.stringify(rects);
+				if (oldSerialized !== newSerialized)
+				{
+					currentlyLoadingImage.cams = cams;
+					currentlyLoadingImage.rects = rects;
+					BI_CustomEvent.Invoke("DynamicGroupLayoutLoaded");
+				}
+			}
+			if (currentlyLoadedImage.id === camId)
+			{
+				currentlyLoadedImage.cams = cams;
+				currentlyLoadedImage.rects = rects;
+			}
+		}
+		catch (ex)
+		{
+			toaster.Error(ex);
+		}
+	}
+	/**
+	 * Fixes a string that contains UTF-8 characters but was read as ISO-8859-1, e.g. from an HTTP header value.  If a case is found where this doesn't work right, it should be resolved by correctly encoding the string in the first place, not by making this function even more hacky.
+	 * @param {String} str String containing malformed UTF-8 characters.
+	 */
+	function UTF8Fix(str)
+	{
+		var bytes = new Uint8Array(str.length);
+		for (var i = 0; i < str.length; i++)
+			bytes[i] = str.charCodeAt(i);
+		return Utf8ArrayToStr(bytes);
+	}
+	/* utf.js - UTF-8 <=> UTF-16 convertion
+	 *
+	 * Copyright (C) 1999 Masanao Izumo <iz@onicos.co.jp>
+	 * Version: 1.0
+	 * LastModified: Dec 25 1999
+	 * This library is free.  You can redistribute it and/or modify it.
+	 */
+
+	function Utf8ArrayToStr(array)
+	{
+		var out, i, len, c;
+		var char2, char3;
+
+		out = "";
+		len = array.length;
+		i = 0;
+		while (i < len)
+		{
+			c = array[i++];
+			switch (c >> 4)
+			{
+				case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7:
+					// 0xxxxxxx
+					out += String.fromCharCode(c);
+					break;
+				case 12: case 13:
+					// 110x xxxx   10xx xxxx
+					char2 = array[i++];
+					out += String.fromCharCode(((c & 0x1F) << 6) | (char2 & 0x3F));
+					break;
+				case 14:
+					// 1110 xxxx  10xx xxxx  10xx xxxx
+					char2 = array[i++];
+					char3 = array[i++];
+					out += String.fromCharCode(((c & 0x0F) << 12) |
+						((char2 & 0x3F) << 6) |
+						((char3 & 0x3F) << 0));
+					break;
+			}
+		}
+		return out;
 	}
 }
 function BICameraData()
 {
 	var self = this;
+	/** Group Name or Cycle Name or Camera Short Name.  For recordings, this is the Camera Short Name. */
 	this.id = "";
-	this.fullwidth = 1280; // Native resolution of image; used when calculating with group rects and as a base for digital zoom
+	/** Native width of image.  Used when calculating with group rects and as a base for digital zoom. */
+	this.fullwidth = 1280;
+	/** Native height of image.  Used when calculating with group rects and as a base for digital zoom. */
 	this.fullheight = 720;
-	this.aspectratio = 1280 / 720;
-	this.actualwidth = 1280; // Actual size of image (can be smaller than fullwidth)
+	/** Actual width of image (can be smaller than fullwidth) */
+	this.actualwidth = 1280;
+	/** Actual width of image (can be smaller than fullheight) */
 	this.actualheight = 720;
-	this.intendedW = 0; // Special value to assist in digital zooming dynamically sized group frames.
-	this.intendedH = 0;
+	/** "Native resolution" of dynamically sized group frame. */
+	this.dynamicNativeW = 0;
+	/** "Native resolution" of dynamically sized group frame. */
+	this.dynamicNativeH = 0;
+	/** Resolution that was last requested. */
+	this.reqwidth = 0;
+	/** Resolution that was last requested. */
+	this.reqheight = 0;
+	/** Path component to use in URLs.  For live/timeline streams, this is the same as [id] and [uniqueId].  For clips, this is a string like "@12345.bvr". */
 	this.path = "";
+	/** Unique ID of the image provider. One of:
+	 * * Group Name
+	 * * Cycle Name
+	 * * Camera Short Name
+	 * * Clip ID
+	 */
 	this.uniqueId = "";
+	/** True if this is a live stream. False if this is a clip or timeline stream. */
 	this.isLive = true;
+	/** If set to a number, this is a recorded timeline video feed that began at this time (some UI elements such as the progress bar should not be shown). */
+	this.timelineStart = false;
+	/** If 1, playback should seek to the next clip.  If -1, playback should seek to the previous clip. */
+	this.timelineJump = 0;
+	/** True if this image provider supports PTZ controls. */
 	this.ptz = false;
-	this.msec = 10000; // Millisecond duration of clips/alerts.  Ignore this if isLive is set.
-	this.isGroup = false;
+	/** True if this image provider supports audio. */
 	this.audio = false;
-
+	/** Millisecond duration of clips/alerts.  Ignore this if isLive is set. */
+	this.msec = 10000;
+	/** True if this represents a group of cameras. */
+	this.isGroup = false;
+	/**
+	 This is the dynamic cams array defining the cameras visible in the group, in order from left to right, top to bottom.
+	 Populated when HTTP headers arrive with a video frame/stream.
+	 If null, you should fall back to the default layout for the group.
+	 */
+	this.cams = null;
+	/**
+	 This is the dynamic rects array defining the coordinates of cameras visible in the group, in order matching the [cams] array.
+	 Populated when HTTP headers arrive with a video frame/stream.
+	 If null, you should fall back to the default layout for the group.*/
+	this.rects = null;
+	/**
+	 * Sets the property values of this instance to the same as another instance.
+	 * @param {Object} other Another BICameraData to copy values from.
+	 */
 	this.CopyValuesFrom = function (other)
 	{
 		self.id = other.id;
 		self.fullwidth = other.fullwidth;
 		self.fullheight = other.fullheight;
-		self.aspectratio = other.aspectratio;
 		self.actualwidth = other.actualwidth;
 		self.actualheight = other.actualheight;
-		self.intendedW = other.intendedW;
-		self.intendedH = other.intendedH;
+		self.dynamicNativeW = other.dynamicNativeW;
+		self.dynamicNativeH = other.dynamicNativeH;
+		self.reqwidth = other.reqwidth;
+		self.reqheight = other.reqheight;
 		self.path = other.path;
 		self.uniqueId = other.uniqueId;
 		self.isLive = other.isLive;
+		self.timelineStart = other.timelineStart;
+		self.timelineJump = other.timelineJump;
 		self.ptz = other.ptz;
+		self.audio = other.audio;
 		self.msec = other.msec;
 		self.isGroup = other.isGroup;
-		self.audio = other.audio;
+		self.cams = other.cams;
+		self.rects = other.rects;
+	}
+	/** Returns true if this is a historical timeline video provider ([timelineStart] is a number). */
+	this.isTimeline = function ()
+	{
+		return typeof self.timelineStart === "number";
+	}
+	/** If [isTimeline], then sets [timelineStart] = videoPlayer.lastFrameUtc. Returns a reference to this instance. */
+	this.UpdateTimelineStart = function ()
+	{
+		if (self.isTimeline())
+			self.timelineStart = videoPlayer.lastFrameUtc;
+		return self;
+	}
+	/** Returns a new ui3Rect representing the native resolution of the image as defined by camera or clip metadata. */
+	this.getFullRect = function ()
+	{
+		return new ui3Rect(self.fullwidth, self.fullheight);
+	}
+	/** Returns a new ui3Rect representing the intended resolution of the image. The "intended" resolution is meaningful only for dynamically-sized group frames, and is quite hacky. */
+	this.getDynamicNativeRect = function ()
+	{
+		return new ui3Rect(self.dynamicNativeW || 0, self.dynamicNativeH || 0);
+	}
+	/** Returns a new ui3Rect representing the actual resolution of the last frame that was loaded for this video source.  If none has loaded yet, it will be equal to the native resolution. */
+	this.getActualRect = function ()
+	{
+		return new ui3Rect(self.actualwidth, self.actualheight);
+	}
+	/** Returns a new ui3Rect representing the resolution that was last requested. */
+	this.getRequestedRect = function ()
+	{
+		return new ui3Rect(self.reqwidth, self.reqheight);
 	}
 }
 ///////////////////////////////////////////////////////////////
 // Jpeg Preview Module ////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
+/** Manages showing and hiding a canvas as necessary to render seek previews in the full video area. */
 var jpegPreviewModule = new (function JpegPreviewModule()
 {
-	/// <summary>Manages showing and hiding a canvas as necessary to render seek previews in the full video area.</summary>
 	var self = this;
-	var isActivated = false;
-	var isInitialized = false;
 	var isVisible = false;
-	var $myImgEle = null;
 	var $camimg_wrapper = $("#camimg_wrapper");
 	var $camimg_store = $("#camimg_store");
 	var $camimg_preview = $('<canvas id="camimg_preview" class="videoCanvas"></canvas>');
 	var camimg_preview_ele = $camimg_preview.get(0);
-	var Initialize = function ()
-	{
-		if (isInitialized)
-			return;
-		isInitialized = true;
-		$camimg_store.append($camimg_preview);
-		$myImgEle = $('<img crossOrigin="Anonymous" id="jpegPreview_img" alt="" style="display: none;" />');
-		var myImgEle_ele = $myImgEle.get(0);
-		$myImgEle.load(function ()
-		{
-			var img = $myImgEle.get(0);
-			if (!img.complete || typeof img.naturalWidth == "undefined" || img.naturalWidth == 0)
-			{
-				// Failed
-				toaster.Error("Unable to decode jpeg image.");
-			}
-			else
-			{
-				// Calling ImageRendered will hide the jpegPreviewModule so we should call it before rendering the image
-				videoPlayer.ImageRendered(img.myUniqueId, img.naturalWidth, img.naturalHeight, performance.now() - img.startTime, false);
-				// Rendering the image shows the jpegPreviewModule again.
-				self.RenderImage(myImgEle_ele);
-			}
-		});
-		$myImgEle.error(function ()
-		{
-			console.log('Bad image assigned to #jpegPreview_img.');
-		});
-		$camimg_store.append($myImgEle);
-	}
 	var Show = function ()
 	{
 		if (isVisible)
 			return;
-		Initialize();
 		isVisible = true;
 		$camimg_preview.appendTo($camimg_wrapper);
 	}
@@ -13355,25 +14566,41 @@ var jpegPreviewModule = new (function JpegPreviewModule()
 	{
 		if (!isVisible)
 			return;
-		Initialize();
 		isVisible = false;
 		$camimg_preview.appendTo($camimg_store);
 	}
 	this.RenderImage = function (imgEle)
 	{
-		Initialize();
 		CopyImageToCanvas(imgEle, camimg_preview_ele);
 		Show();
 		videoOverlayHelper.HideLoadingOverlay();
 		playbackControls.FrameTimestampUpdated(false);
 	}
-	this.RenderDataURI = function (startTime, uniqueId, dataUri)
+	this.RenderDataURI = function (startTime, uniqueId, dataUri, utc, headers, isTimelineJump)
 	{
-		Initialize();
-		var img = $("#jpegPreview_img").get(0);
-		img.startTime = startTime;
-		img.myUniqueId = uniqueId;
-		img.src = dataUri;
+		LoadImagePromise(dataUri)
+			.then(function (data)
+			{
+				var img = data.image;
+				if (!img.complete || typeof img.naturalWidth == "undefined" || img.naturalWidth == 0)
+				{
+					// Failed
+					toaster.Error("Unable to decode jpeg image.");
+				}
+				else
+				{
+					if (headers)
+						videoPlayer.GroupLayoutMetadataReceived(uniqueId, headers["x-camlist"], headers["x-reclist"]);
+					// Calling ImageRendered will hide the jpegPreviewModule so we should call it before rendering the image
+					videoPlayer.ImageRendered({ id: uniqueId, w: img.naturalWidth, h: img.naturalHeight, loadingTime: performance.now() - startTime, utc: utc, isSeekPreview: true, isTimelineJump: !!isTimelineJump });
+					// Rendering the image shows the jpegPreviewModule again.
+					self.RenderImage(img);
+				}
+			})
+			.catch(function (err)
+			{
+				console.log('Bad image assigned to jpegPreviewModule.RenderDataURI.');
+			});
 	}
 })();
 ///////////////////////////////////////////////////////////////
@@ -13394,8 +14621,8 @@ function JpegVideoModule()
 	var lastReceivedSize = { w: 0, h: 0 };
 	var lastLoadedTimeValue = -1;
 
-	var currentImageTimestampMs = new Date().getTime();
-	var currentImageRequestedAtMs = new Date().getTime();
+	var currentImageRequestedAtMs = performance.now();
+	var currentImageTimestampGuessUtc = -1;
 	var staticSnapshotId = "";
 	var lastSnapshotUrl = "";
 	var lastSnapshotFullUrl = "";
@@ -13413,6 +14640,14 @@ function JpegVideoModule()
 	var $camimg_canvas;
 	var camimg_canvas_ele;
 	var backbuffer_canvas;
+	// Contains URLs of the last image we started loading and the last image we loaded.
+	var imageLoadingState = { loadingUrl: "", loadedUrl: "" };
+	/** Contains critical timeline arguments which, if changed, will break the current timeline stream. If this string has changed, a new timeline stream must be started. */
+	var lastTimelineCriticalArgs = "";
+	/** A counter that is incremented each time we open a new video stream. Frames that arrive from a previous stream are discarded without being rendered.
+	 * This was made necessary in Feb 2022 due to Jpeg video player changes to support the timeline. Specifically when timelineSync was added, it added an 
+	 * unpredictable delay between updating the [loading] field and updating the [imageLoadingState] field... it is complicated. */
+	var currentStreamId = 0;
 
 	var Initialize = function ()
 	{
@@ -13422,72 +14657,119 @@ function JpegVideoModule()
 		// Do one-time initialization here
 		$camimg_canvas = $('<canvas id="camimg_canvas" class="videoCanvas"></canvas>');
 		camimg_canvas_ele = $camimg_canvas.get(0);
-		var camObj = $('<img crossOrigin="Anonymous" id="camimg" src="" alt="" style="display: none;" />');
 		var $backbuffer_canvas = $('<canvas id="backbuffer_canvas" style="display: none;"></canvas>');
 		backbuffer_canvas = $backbuffer_canvas.get(0);
 		$camimg_store.append($camimg_canvas);
-		$camimg_store.append(camObj);
 		$camimg_store.append($backbuffer_canvas);
+	}
+	function LoadImageFromUrl(url, streamId)
+	{
+		imageLoadingState.loadingUrl = url;
 
-		var camimg_ele = camObj.get(0);
-		camObj.load(function ()
-		{
-			ClearImageLoadTimeout();
-			if (!isCurrentlyActive)
-				return;
-			if (!this.complete || typeof this.naturalWidth == "undefined" || this.naturalWidth == 0)
+		var loadWithHeaders = true;
+		var promise;
+		if (loadWithHeaders)
+			promise = DownloadToDataUri(url);
+		else
+			promise = new Promise(function (resolve, reject) { resolve({ dataUri: url, headers: null }); });
+
+		promise
+			.then(function (result)
 			{
-				// Failed
-				programmaticSoundPlayer.NotifyDisconnected();
-			}
-			else
+				if (currentStreamId !== streamId || imageLoadingState.loadingUrl !== url)
+					return; // A new image began loading before this one completed; this result is no longer needed.
+				return LoadImagePromise(result.dataUri, result.headers, result.imageSizeBytes);
+			})
+			.then(function (data)
 			{
-				programmaticSoundPlayer.NotifyReconnected();
-				loadedFirstFrame = true;
-				var msLoadingTime = new Date().getTime() - currentImageRequestedAtMs;
-				if (lastReceivedSize.w !== this.naturalWidth || lastReceivedSize.h !== this.naturalHeight)
+				if (currentStreamId !== streamId || imageLoadingState.loadingUrl !== url)
+					return; // A new image began loading before this one completed; this result is no longer needed.
+				var image = data.image;
+				var headers = data.headers;
+				var imageSizeBytes = data.imageSizeBytes;
+				if (!imageSizeBytes)
+					imageSizeBytes = 0;
+				else
+					bitRateCalc_Video.AddDataPoint(imageSizeBytes);
+
+				ClearImageLoadTimeout();
+				if (!isCurrentlyActive)
+					return;
+
+				if (!image.complete || typeof image.naturalWidth == "undefined" || image.naturalWidth == 0)
 				{
-					lastReceivedSize.w = this.naturalWidth;
-					lastReceivedSize.h = this.naturalHeight;
-					if (loading.isGroup)
-						Debounced_AsyncLoadDynamicGroupRects();
+					// Failed
+					programmaticSoundPlayer.NotifyDisconnected();
 				}
-				videoPlayer.ImageRendered(loading.uniqueId, this.naturalWidth, this.naturalHeight, msLoadingTime, new Date(currentImageRequestedAtMs));
-
-				playbackControls.FrameTimestampUpdated(false);
-
-				CopyImageToCanvas(camimg_ele, camimg_canvas_ele);
-
-				if (nerdStats.IsOpen())
+				else
 				{
-					var loaded = videoPlayer.Loaded().image;
-					var nativeRes = "";
-					if (cameraListLoader.isDynamicLayoutEligible(loaded.id))
-						nativeRes = " (dynamically sized group)";
-					else
+					programmaticSoundPlayer.NotifyReconnected();
+					var isFirstFrame = !loadedFirstFrame;
+					loadedFirstFrame = true;
+					imageLoadingState.loadedUrl = url;
+					var msLoadingTime = performance.now() - currentImageRequestedAtMs;
+					if (lastReceivedSize.w !== image.naturalWidth || lastReceivedSize.h !== image.naturalHeight)
 					{
-						nativeRes = " (Native: " + loading.fullwidth + "x" + loading.fullheight + ")";
-						if (loading.fullwidth !== loaded.actualwidth || loading.fullheight !== loaded.actualheight)
-							nativeRes = '<span class="nonMatchingNativeRes">' + nativeRes + '</span>';
+						lastReceivedSize.w = image.naturalWidth;
+						lastReceivedSize.h = image.naturalHeight;
 					}
+					if (headers)
+						videoPlayer.GroupLayoutMetadataReceived(loading.id, headers["x-camlist"], headers["x-reclist"]);
+					var frameUtc = currentImageTimestampGuessUtc >= 0 ? currentImageTimestampGuessUtc : parseInt(headers["x-utc"]);
+					if (loading.isTimeline())
+						clipPlaybackPosition = frameUtc;
+					videoPlayer.ImageRendered({ id: loading.uniqueId, w: image.naturalWidth, h: image.naturalHeight, loadingTime: msLoadingTime, utc: frameUtc, isFirstFrame: isFirstFrame });
+					playbackControls.FrameTimestampUpdated(false);
 
-					nerdStats.BeginUpdate();
-					nerdStats.UpdateStat("Viewport", null, $layoutbody.width() + "x" + $layoutbody.height() + GetDevicePixelRatioTag());
-					nerdStats.UpdateStat("Stream Resolution", null, loaded.actualwidth + "x" + loaded.actualheight + nativeRes);
-					nerdStats.UpdateStat("Seek Position", loading.isLive ? "LIVE" : (parseInt(self.GetSeekPercent() * 100) + "% (Frame Offset: " + Math.floor(clipPlaybackPosition) + "ms)"));
-					nerdStats.UpdateStat("Codecs", "jpeg");
-					nerdStats.UpdateStat("Jpeg Loading Time", msLoadingTime, msLoadingTime + "ms", true);
-					nerdStats.EndUpdate();
+					CopyImageToCanvas(image, camimg_canvas_ele);
+
+					if (nerdStats.IsOpen())
+					{
+						var loaded = videoPlayer.Loaded().image;
+						var nativeRes = "";
+						if (cameraListLoader.isDynamicLayoutEligible(loaded.id))
+							nativeRes = " (dynamically sized group)";
+						else
+						{
+							nativeRes = " (Native: " + loading.getFullRect().toString() + ")";
+							if (loading.fullwidth !== loaded.actualwidth || loading.fullheight !== loaded.actualheight)
+								nativeRes = '<span class="nonMatchingNativeRes">' + nativeRes + '</span>';
+						}
+
+						var bitRate_Video = bitRateCalc_Video.GetBPS() * 8;
+						var digitalZoom = '<span title="Digital Zoom Factor"> \uD83D\uDD0D' + imageRenderer.zoomHandler.GetZoomFactor().toFixed(2) + 'x</span>';
+
+						nerdStats.BeginUpdate();
+						nerdStats.UpdateStat("Viewport", null, $layoutbody.width() + "x" + $layoutbody.height() + GetDevicePixelRatioTag() + digitalZoom);
+						nerdStats.UpdateStat("Stream Resolution", null, loaded.getActualRect().toString() + nativeRes);
+						if (!loaded.getActualRect().Equals(loaded.getRequestedRect()))
+							nerdStats.UpdateStat("Requested Res", null, '<span class="requestedRes">' + loaded.getRequestedRect().toString() + '</span>');
+						if (loading.isLive)
+							nerdStats.UpdateStat("Seek Position", "LIVE");
+						else if (loading.isTimeline())
+							nerdStats.UpdateStat("Seek Position", MsToDHMS(frameUtc - GetUtcNow(), false, true));
+						else
+							nerdStats.UpdateStat("Seek Position", (self.GetSeekPercent() * 100).toFixed() + "%");
+						nerdStats.UpdateStat("Frame Time", GetDateStr(new Date(frameUtc + GetServerTimeOffset()), true));
+						nerdStats.UpdateStat("Codecs", "jpeg");
+						nerdStats.UpdateStat("Jpeg Bit Rate", bitRate_Video, formatBitsPerSecond(bitRate_Video, 1), true);
+						nerdStats.UpdateStat("Jpeg Frame Size", imageSizeBytes, formatBytes(imageSizeBytes, 2), true);
+						nerdStats.UpdateStat("Jpeg Loading Time", msLoadingTime, Math.round(msLoadingTime) + "ms", true);
+						nerdStats.EndUpdate();
+					}
 				}
-			}
-			GetNewImage();
-		});
-		camObj.error(function ()
-		{
-			programmaticSoundPlayer.NotifyDisconnected();
-			ClearImageLoadTimeout();
-			setTimeout(GetNewImage, 1000);
-		});
+				GetNewImage();
+			})
+			.catch(function (data)
+			{
+				programmaticSoundPlayer.NotifyDisconnected();
+				ClearImageLoadTimeout();
+				setTimeout(GetNewImage, 1000);
+			})
+			.finally(function ()
+			{
+				timelineSync.unlock();
+			});
 	}
 	var Activate = function ()
 	{
@@ -13522,19 +14804,13 @@ function JpegVideoModule()
 	{
 		return loadedFirstFrame;
 	}
-	var Debounced_AsyncLoadDynamicGroupRects = debounce(function ()
-	{
-		var loadedImg = videoPlayer.Loaded().image;
-		if (cameraListLoader.isDynamicLayoutEnabled(loadedImg.id))
-			cameraListLoader.AsyncLoadDynamicGroupRects(loadedImg.id, loadedImg.actualwidth + "x" + loadedImg.actualheight);
-	}, 250);
 	var openVideoTimeout = null;
 	var lastOpenVideoCallAt = -60000;
 	var lastStreamBeganAt = 0;
 	var timeBetweenOpenVideoCalls = 300;
 	this.OpenVideo = function (videoData, offsetPercent, startPaused)
 	{
-		if (skipLoadingFirstVideoStream)
+		if (skipLoadingFirstVideoStream || skipLoadingAllVideoStreams)
 		{
 			skipLoadingFirstVideoStream = false;
 			return;
@@ -13560,6 +14836,7 @@ function JpegVideoModule()
 
 		if (videoPlayer.handleDisabledCamera(videoData))
 			return;
+		var previousStreamWasTimeline = loading && loading.isTimeline();
 		loading.CopyValuesFrom(videoData);
 		honorAlertOffset = offsetPercent === -1;
 		if (!offsetPercent)
@@ -13570,28 +14847,45 @@ function JpegVideoModule()
 		if (playbackControls.GetPlayReverse() && offsetPercent === 0)
 			offsetPercent = 1;
 		clipPlaybackPosition = Clamp(offsetPercent, 0, 1) * (loading.msec - 1);
-		timeLastClipFrame = Date.now();
+		timeLastClipFrame = performance.now();
 		if (startPaused)
 			self.Playback_Pause();
 		else
 			self.Playback_Play();
 		videoOverlayHelper.ShowLoadingOverlay(true);
-		var clipData = clipLoader.GetClipFromId(loading.uniqueId);
-		if (clipData && !clipData.isSnapshot && !clipData.isClip)
+		currentStreamId++;
+		if (loading.isTimeline())
 		{
-			if (honorAlertOffset && (clipData.flags & alert_flag_offsetMs) == 0)
-				toaster.Warning("Blue Iris did not provide an offset in milliseconds for this alert, so it may begin at the wrong position.", 10000);
-			// Load clip stats for this alert.
-			clipStatsLoader.LoadClipStats("@" + clipData.clipId, function (stats)
-			{
-				clipLoader.ApplyMissingStatsToClipData(stats, clipData);
-				if (loading.uniqueId == clipData.recId)
-					loading.msec = stats.msec;
-				var loadingImg = videoPlayer.Loading().image;
-				if (loadingImg.uniqueId == clipData.recId)
-					loadingImg.msec = stats.msec;
-			});
+			videoPlayer.lastFrameUtc = loading.timelineStart;
+			clipPlaybackPosition = loading.timelineStart;
+			loading.newTimelineStream = true;
 		}
+		else if (!loading.isLive)
+		{
+			var clipData = clipLoader.GetClipFromId(loading.uniqueId);
+			if (clipData)
+			{
+				var offset = clipData.isClip ? 0 : clipData.offsetMs;
+				videoPlayer.lastFrameUtc = (clipData.date.getTime() - offset) + clipPlaybackPosition;
+				if (!clipData.isSnapshot && !clipData.isClip)
+				{
+					if (honorAlertOffset && (clipData.flags & BIDBFLAG_ALERT_OFFSETTIME) == 0)
+						toaster.Warning("Blue Iris did not provide an offset in milliseconds for this alert, so it may begin at the wrong position.", 10000);
+					// Load clip stats for this alert.
+					clipStatsLoader.LoadClipStats("@" + clipData.clipId, function (stats)
+					{
+						clipLoader.ApplyMissingStatsToClipData(stats, clipData);
+						if (loading.uniqueId == clipData.recId)
+							loading.msec = stats.msec;
+						var loadingImg = videoPlayer.Loading().image;
+						if (loadingImg.uniqueId == clipData.recId)
+							loadingImg.msec = stats.msec;
+					});
+				}
+			}
+		}
+		else
+			videoPlayer.lastFrameUtc = GetUtcNow();
 		GetNewImage();
 		UpdateCurrentURL();
 		BI_CustomEvent.Invoke("OpenVideo", loading);
@@ -13606,7 +14900,15 @@ function JpegVideoModule()
 	}
 	this.GetLastSnapshotUrl = function ()
 	{
-		return lastSnapshotUrl;
+		// This is the jpeg video player.
+		var sizeQualityArgs = JpegSnapshotArgs(loading);
+		var groupArgs = groupCfg.GetUrlArgs(loading);
+		if (loading.isLive)
+			return RemoveUrlParameters(lastSnapshotUrl, "w", "h", "q", "stream") + sizeQualityArgs + groupArgs;
+		else if (loading.isTimeline())
+			return RemoveUrlParameters(lastSnapshotUrl, "pos", "speed", "skipdeadair", "opaque", "w", "h", "q", "stream", "nc") + "&isolate&pos=" + videoPlayer.lastFrameUtc.dropDecimalsStr() + sizeQualityArgs + groupArgs;
+		else
+			return RemoveUrlParameters(lastSnapshotUrl, "w", "h", "q", "stream") + sizeQualityArgs;
 	}
 	this.GetLastSnapshotFullUrl = function ()
 	{
@@ -13620,10 +14922,6 @@ function JpegVideoModule()
 	{
 		return staticSnapshotId;
 	}
-	this.GetCurrentImageTimeMs = function ()
-	{
-		return currentImageTimestampMs;
-	}
 	this.GetOffsetFromStartMs = function ()
 	{
 		if (self.Playback_IsPaused())
@@ -13633,14 +14931,80 @@ function JpegVideoModule()
 	}
 	var GetNewImage = function ()
 	{
+		timelineSync.run(this, GNI_Internal);
+	}
+	/** Called by GetNewImage to do all the real work after obtaining the lock on timelineSync. */
+	var GNI_Internal = function ()
+	{
 		ClearGetNewImageTimeout();
 		if (currentServer.isLoggingOut || !isCurrentlyActive)
+		{
+			timelineSync.unlock();
 			return;
-		var timeValue = currentImageTimestampMs = currentImageRequestedAtMs = new Date().getTime();
+		}
+		var timeValue = currentImageRequestedAtMs = performance.now();
 		var isLoadingRecordedSnapshot = false;
 		var isVisible = !documentIsHidden();
+
+		var sizeToRequest = imageRenderer.GetSizeToRequest(loading);
+		var sizeArgs = "&w=" + sizeToRequest.w + "&h=" + sizeToRequest.h; // Also included in qualityArg later
+
 		var overlayArgs = "";
-		if (!loading.isLive)
+		var timelineSpeedArg = "";
+		var timelinePosArg = "";
+		var timelineCriticalArgs = null;
+
+		if (loading.isTimeline())
+		{
+			if (!clipPlaybackPosition)
+				clipPlaybackPosition = clipTimeline.getCurrentTime();
+			clipPlaybackPosition = clipTimeline.BoundsCheckTimelineMs(clipPlaybackPosition);
+			if (!clipPlaybackPosition)
+			{
+				timelineSync.unlock();
+				videoPlayer.goLive();
+				return;
+			}
+
+			overlayArgs = clipOverlayCfg.GetUrlArgs("*ui3_timeline_pseudocam");
+
+			var speedMultiplier = playbackControls.GetPlaybackSpeed();
+			if (playbackPaused || clipTimeline.timelineDidPauseVideo() || !isVisible)
+			{
+				self.Playback_Pause();
+				speedMultiplier = 0;
+				loading.newTimelineStream = true;
+			}
+			else
+				speedMultiplier = (Math.round(100 * speedMultiplier) * (playbackControls.GetPlayReverse() ? -1 : 1));
+			var speedArg = "&speed=" + speedMultiplier;
+			timelineCriticalArgs = overlayArgs + speedArg;
+			if (cameraListLoader.CameraIsGroup(cameraListLoader.GetCameraWithId(loading.id)))
+				timelineCriticalArgs += sizeArgs;
+			if (lastTimelineCriticalArgs !== timelineCriticalArgs)
+			{
+				clipPlaybackPosition = clipTimeline.getCurrentTime();
+				loading.newTimelineStream = true;
+			}
+
+			if (loading.newTimelineStream)
+			{
+				currentStreamId++;
+				timelineSpeedArg = speedArg;
+				timelinePosArg = "&pos=" + clipPlaybackPosition.dropDecimalsStr();
+				timelinePosArg += playbackControls.GetSkipDeadAirArg();
+				if (loading.timelineJump)
+				{
+					timelinePosArg += "&jump=" + loading.timelineJump;
+					loading.timelineJump = 0;
+				}
+			}
+			else
+			{
+				timelinePosArg = "&nc=" + timeValue.dropDecimalsStr(); // "nc" is for redundant cache-busting and also so some later code knows the player isn't paused.
+			}
+		}
+		else if (!loading.isLive)
 		{
 			var timePassed = timeValue - timeLastClipFrame;
 			timeLastClipFrame = timeValue.toFixed(0);
@@ -13653,7 +15017,7 @@ function JpegVideoModule()
 			clipPlaybackPosition += timePassed;
 
 			var clipData = clipLoader.GetClipFromId(loading.uniqueId);
-			if (honorAlertOffset && clipData != null)
+			if (honorAlertOffset && clipData)
 			{
 				clipPlaybackPosition = clipData.offsetMs; // This offset is where the alert begins within the clip.
 				if (playbackControls.GetPlayReverse()) // If playing in reverse, lets start at the end of the alert's bounds.
@@ -13671,40 +15035,34 @@ function JpegVideoModule()
 				clipPlaybackPosition = loading.msec - 1;
 				videoPlayer.Playback_Ended(false);
 			}
-
 			timeValue = clipPlaybackPosition;
-			// Update currentImageTimestampMs so that saved snapshots know the time for file naming
-			if (clipData != null)
+			if (clipData)
 			{
-				var offset = clipData.isClip ? 0 : clipData.offsetMs;
-				currentImageTimestampMs = (clipData.date.getTime() - offset) + clipPlaybackPosition;
 				isLoadingRecordedSnapshot = clipData.isSnapshot;
 				if (isLoadingRecordedSnapshot)
 					staticSnapshotId = loading.uniqueId;
 				else
 					staticSnapshotId = "";
-			}
-			if (clipData)
 				overlayArgs = clipOverlayCfg.GetUrlArgs(clipData.camera);
+			}
 		}
-
-		var sizeToRequest = imageRenderer.GetSizeToRequest(true, loading);
-		var sizeArgs = "&w=" + sizeToRequest.w + (cameraListLoader.isDynamicLayoutEnabled(loading.id) ? "&h=" + sizeToRequest.h : "");
-		$("#camimg").attr('loadingimg', loading.id);
 
 		var qualityArg = genericQualityHelper.GetCurrentProfile().GetUrlArgs(loading);
 
-		var groupArgs = loading.isGroup ? groupCfg.GetUrlArgs(loading.id) : "";
+		var groupArgs = groupCfg.GetUrlArgs(loading);
 
 		// We force the session arg into all image requests because we don't need them to be cached and we want copied URLs to work without forcing login.
-		if (loading.isLive)
-			lastSnapshotUrl = currentServer.remoteBaseURL + "image/" + loading.path + '?time=' + timeValue.dropDecimalsStr() + currentServer.GetAPISessionArg("&", true);
+		if (loading.isTimeline())
+			lastSnapshotUrl = currentServer.remoteBaseURL + "time/" + loading.path + '?jpeg' + timelineSpeedArg + timelinePosArg + currentServer.GetAPISessionArg("&", true) + '&opaque=' + ui3InstanceId + overlayArgs;
+		else if (loading.isLive)
+			lastSnapshotUrl = currentServer.remoteBaseURL + "image/" + loading.path + '?nc=' + timeValue.dropDecimalsStr() + currentServer.GetAPISessionArg("&", true);
 		else
 			lastSnapshotUrl = currentServer.remoteBaseURL + "file/clips/" + loading.path + '?time=' + timeValue.dropDecimalsStr() + currentServer.GetAPISessionArg("&", true) + overlayArgs;
-		var imgSrcPath = lastSnapshotFullUrl = lastSnapshotUrl + sizeArgs + qualityArg + groupArgs;
+		var imgSrcPath = lastSnapshotFullUrl = lastSnapshotUrl + qualityArg + groupArgs;
 
-		if ($("#camimg").attr('src') == imgSrcPath)
+		if (imageLoadingState.loadedUrl == imgSrcPath)
 		{
+			timelineSync.unlock();
 			videoOverlayHelper.HideLoadingOverlay();
 			GetNewImageAfterTimeout();
 		}
@@ -13718,17 +15076,23 @@ function JpegVideoModule()
 				|| (playbackPaused && loading.isLive) // Live video can be paused since UI3-175
 			)
 			{
+				timelineSync.unlock();
 				if (isLoadingRecordedSnapshot)
 					videoOverlayHelper.HideLoadingOverlay();
 				GetNewImageAfterTimeout();
 			}
 			else
 			{
+				if (timelineCriticalArgs !== null)
+					lastTimelineCriticalArgs = timelineCriticalArgs;
+				loading.newTimelineStream = false;
 				lastRequestedSize = sizeToRequest;
 				repeatedSameImageURLs = 1;
 				SetImageLoadTimeout();
 				lastLoadedTimeValue = timeValue;
-				$("#camimg").attr('src', imgSrcPath);
+				currentImageTimestampGuessUtc = loading.isLive ? GetUtcNow() : -1;
+				videoPlayer.notifyImageLoading(loading, lastRequestedSize);
+				LoadImageFromUrl(imgSrcPath, currentStreamId);
 			}
 		}
 	}
@@ -13747,25 +15111,36 @@ function JpegVideoModule()
 	}
 	this.Playback_Pause = function ()
 	{
-		playbackPaused = true;
-		playbackControls.setPlayPauseButtonState(playbackPaused);
-		BI_CustomEvent.Invoke("Playback_Pause", loading);
+		if (!playbackPaused)
+		{
+			playbackPaused = true;
+			playbackControls.setPlayPauseButtonState(playbackPaused);
+			BI_CustomEvent.Invoke("Playback_Pause", loading);
+		}
 	}
 	this.Playback_Play = function ()
 	{
-		lastStreamBeganAt = performance.now();
-		playbackPaused = false;
-		playbackControls.setPlayPauseButtonState(playbackPaused);
-		if (!loading.isLive)
+		if (playbackPaused)
 		{
-			if (clipPlaybackPosition >= loading.msec - 1 && !playbackControls.GetPlayReverse())
-				clipPlaybackPosition = 0;
-			else if (clipPlaybackPosition <= 0 && playbackControls.GetPlayReverse())
-				clipPlaybackPosition = loading.msec - 1;
-			if (clipPlaybackPosition < 0)
-				clipPlaybackPosition = 0;
+			lastStreamBeganAt = performance.now();
+			playbackPaused = false;
+			playbackControls.setPlayPauseButtonState(playbackPaused);
+			if (loading.isTimeline())
+			{
+				loading.newTimelineStream = true;
+				clipPlaybackPosition = clipTimeline.getCurrentTime();
+			}
+			else if (!loading.isLive)
+			{
+				if (clipPlaybackPosition >= loading.msec - 1 && !playbackControls.GetPlayReverse())
+					clipPlaybackPosition = 0;
+				else if (clipPlaybackPosition <= 0 && playbackControls.GetPlayReverse())
+					clipPlaybackPosition = loading.msec - 1;
+				if (clipPlaybackPosition < 0)
+					clipPlaybackPosition = 0;
+			}
+			BI_CustomEvent.Invoke("Playback_Play", loading);
 		}
-		BI_CustomEvent.Invoke("Playback_Play", loading);
 	}
 	this.NotifyClipMetadataChanged = function (clipData)
 	{
@@ -13820,9 +15195,9 @@ function JpegVideoModule()
 		var context2d = canvas.getContext("2d");
 		context2d.drawImage(backbuffer_canvas, 0, 0, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
 	}
-	this.DrawThumbAsFullCamera = function (cameraId, groupId, resolution)
+	this.DrawThumbAsFullCamera = function (cameraId, groupId)
 	{
-		var thumbBounds = cameraListLoader.GetCameraBoundsInCurrentGroupImageScaled(cameraId, groupId, resolution);
+		var thumbBounds = cameraListLoader.GetCameraBoundsInCurrentGroupImageScaled(cameraId, groupId);
 		if (!thumbBounds)
 			return;
 		var cameraObj = cameraListLoader.GetCameraWithId(cameraId);
@@ -13908,7 +15283,6 @@ function FetchH264VideoModule()
 	var lastNerdStatsUpdate = performance.now();
 	var isLoadingRecordedSnapshot = false;
 	var endSnapshotDisplayTimeout = null;
-	var currentImageDateMs = GetServerDate(new Date()).getTime();
 	var failLimiter = new FailLimiter(5, 20000);
 	var reconnectDelayedToast = new PersistentToast("reconnectDelayedToast", "ERROR", true);
 	var reconnectingToast = new PersistentToast("reconnectingToast", "WARNING");
@@ -13918,7 +15292,6 @@ function FetchH264VideoModule()
 	var streamHasAudio = 0; // -1: no audio, 0: unknown, 1: audio
 	var lastFrameMetadata = { width: 0, height: 0, pos: 0, timestamp: 0, rawtime: 0, utc: Date.now(), expectedInterframe: 100 };
 	var audioCodec = "";
-	var loadDynamicGroupLayout = false;
 
 	var loading = new BICameraData();
 
@@ -13928,6 +15301,10 @@ function FetchH264VideoModule()
 	var $volumeBar = $("#volumeBar");
 
 	var lastStatusBlock = null;
+
+	var lastRequestedSize = null;
+	var AfterResized2Debounced = debounce(AfterResized2, 250);
+	BI_CustomEvent.AddListener("afterResize", AfterResized);
 
 	var Initialize = function (h264PlayerChoice)
 	{
@@ -13962,7 +15339,8 @@ function FetchH264VideoModule()
 		else
 		{
 			// This is the automatic player selection algorithm:
-			if (mse_mp4_h264_supported)
+			var isAndroidFF = BrowserIsAndroid() && BrowserIsFirefox();
+			if (mse_mp4_h264_supported && !isAndroidFF)
 			{
 				isInitialized = false;
 				Initialize(H264PlayerOptions.HTML5);
@@ -14040,7 +15418,7 @@ function FetchH264VideoModule()
 		if (visible && isCurrentlyActive)
 		{
 			if (loading.isLive)
-				self.OpenVideo(loading);
+				self.OpenVideo(loading.UpdateTimelineStart());
 			else if (!playbackPaused)
 				self.Playback_Play();
 		}
@@ -14064,7 +15442,7 @@ function FetchH264VideoModule()
 	var openVideoTimeout = null;
 	this.OpenVideo = function (videoData, offsetPercent, startPaused)
 	{
-		if (skipLoadingFirstVideoStream)
+		if (skipLoadingFirstVideoStream || skipLoadingAllVideoStreams)
 		{
 			skipLoadingFirstVideoStream = false;
 			return;
@@ -14101,7 +15479,6 @@ function FetchH264VideoModule()
 			offsetPercent = 1;
 		currentSeekPositionPercent = Clamp(offsetPercent, 0, 1);
 		lastStreamBeganAt = lastFrameAt = performance.now();
-		currentImageDateMs = Date.now();
 		isLoadingRecordedSnapshot = false;
 		clearTimeout(failureRecoveryTimeout);
 		clearTimeout(endSnapshotDisplayTimeout);
@@ -14117,11 +15494,60 @@ function FetchH264VideoModule()
 			audioArg += "1";
 		var overlayArgs = "";
 		var videoUrl;
-		if (loading.isLive)
+		var groupArgs = groupCfg.GetUrlArgs(loading);
+		var profileArgs = genericQualityHelper.GetCurrentProfile().GetUrlArgs(loading);
+		lastRequestedSize = imageRenderer.GetSizeToRequest(loading, genericQualityHelper.GetCurrentProfile());
+		videoPlayer.notifyImageLoading(loading, lastRequestedSize);
+		var fetchOptions = { timestampScale: 1 };
+		if (loading.isTimeline())
 		{
-			var groupArgs = loading.isGroup ? groupCfg.GetUrlArgs(loading.id) : "";
-			videoUrl = currentServer.remoteBaseURL + "video/" + loading.path + "/2.0" + currentServer.GetAPISessionArg("?", true) + audioArg + genericQualityHelper.GetCurrentProfile().GetUrlArgs(loading) + groupArgs + "&extend=2";
-			loadDynamicGroupLayout = true;
+			// Seeking with /time/set is disabled because its performance was terrible during testing. 
+			// Besides, the video stream ends when the user begins to seek, so /time/set is not even 
+			// appropriate unless we change how pausing works just for the timeline stream... yuck.
+			//var loaded = videoPlayer.Loaded().image;
+			//if (loaded.isTimeline() && loaded.id === loading.id && !self.Playback_IsPaused())
+			//{
+			//	videoPlayer.TimelineSeek(loading.timelineStart);
+			//	return;
+			//}
+			videoPlayer.lastFrameUtc = loading.timelineStart;
+			var jumpArg = "";
+			if (loading.timelineJump)
+			{
+				jumpArg = "&jump=" + loading.timelineJump;
+				loading.timelineJump = 0;
+			}
+			if (startPaused)
+			{
+				// I hate hacks. This is definitely a hack, but it is a lot easier to load a scrubbing jpeg than it is to play one frame of H.264 video in the HTML5 player.
+				StopStreaming();
+				reconnectDelayedToast.hide();
+				self.Playback_Pause();
+				// Must delay for a 0ms timeout so that StopStreaming() method has a chance to take effect (aborting a fetch is asynchronous, but otherwise should be immediate).
+				// Otherwise the downloadSeekPreview method will see a fetch is still active, and will not proceed.
+				setTimeout(function ()
+				{
+					timelineSync.run(this, function ()
+					{
+						clipTimeline.getVue().downloadSeekPreview(loading.timelineStart, jumpArg);
+						UpdateCurrentURL();
+						BI_CustomEvent.Invoke("OpenVideo", loading);
+					});
+				}, 0);
+				return;
+			}
+			var speed = 100 * playbackControls.GetPlaybackSpeed();
+			if (playbackControls.GetPlayReverse())
+				speed *= -1;
+			var speedArg = "&speed=" + Math.round(speed);
+			var skipDeadAirArg = playbackControls.GetSkipDeadAirArg();
+			overlayArgs = clipOverlayCfg.GetUrlArgs("*ui3_timeline_pseudocam");
+			videoUrl = currentServer.remoteBaseURL + "time/" + loading.path + currentServer.GetAPISessionArg("?", true) + '&opaque=' + ui3InstanceId + '&pos=' + Math.floor(loading.timelineStart) + jumpArg + audioArg + profileArgs + groupArgs + speedArg + skipDeadAirArg + "&extend=2" + overlayArgs;
+		}
+		else if (loading.isLive)
+		{
+			videoPlayer.lastFrameUtc = GetUtcNow();
+			videoUrl = currentServer.remoteBaseURL + "video/" + loading.path + "/2.0" + currentServer.GetAPISessionArg("?", true) + audioArg + profileArgs + groupArgs + "&extend=2";
 		}
 		else
 		{
@@ -14152,7 +15578,7 @@ function FetchH264VideoModule()
 				if (honorAlertOffset && !clipData.isSnapshot)
 				{
 					var offsetMs = clipData.offsetMs;
-					if (!clipData.isClip && (clipData.flags & alert_flag_offsetMs) == 0)
+					if (!clipData.isClip && (clipData.flags & BIDBFLAG_ALERT_OFFSETTIME) == 0)
 					{
 						toaster.Warning("Blue Iris did not provide an offset in milliseconds for this alert, so it may begin at the wrong position.", 10000);
 						path = clipData.alertPath;
@@ -14171,7 +15597,7 @@ function FetchH264VideoModule()
 					else
 						currentSeekPositionPercent = Clamp(offsetMs / lastMs, 0, 1);
 				}
-				currentImageDateMs = clipData.date.getTime() + (currentSeekPositionPercent * lastMs);
+				videoPlayer.lastFrameUtc = clipData.date.getTime() + (currentSeekPositionPercent * lastMs);
 				overlayArgs = clipOverlayCfg.GetUrlArgs(clipData.camera);
 			}
 			if (speed !== 100)
@@ -14196,14 +15622,11 @@ function FetchH264VideoModule()
 				reqMs = (currentSeekPositionPercent * (loading.msec + offsetMsec)).dropDecimals();
 				posArg = "";
 			}
-			var urlArgs = genericQualityHelper.GetCurrentProfile().GetUrlArgs(loading);
-			var widthAndQualityArg = "";
 			if (speed === 0)
 			{
-				// speed == 0 means we'll get a jpeg, so we should include w and q arguments.
-				if (urlArgs.indexOf("&h=") === -1)
-					widthAndQualityArg += "&w=" + imageRenderer.GetSizeToRequest(false, loading).w;
-				widthAndQualityArg += "&q=50";
+				// speed == 0 means we'll get a jpeg
+				// set quality to 50
+				profileArgs = RemoveUrlParameters(profileArgs, "q") + "&q=50";
 			}
 			var offsetArg = "";
 			if (reqMs !== null)
@@ -14212,7 +15635,9 @@ function FetchH264VideoModule()
 				offsetArg = "&time=" + reqMs;
 				loading.requestedMs = reqMs;
 			}
-			videoUrl = currentServer.remoteBaseURL + "file/clips/" + path + currentServer.GetAPISessionArg("?", true) + posArg + "&speed=" + speed + audioArg + urlArgs + "&extend=2" + offsetArg + widthAndQualityArg + overlayArgs;
+			speed = Math.round(speed);
+			fetchOptions.timestampScale = speed / 100;
+			videoUrl = currentServer.remoteBaseURL + "file/clips/" + path + currentServer.GetAPISessionArg("?", true) + posArg + "&speed=" + speed + audioArg + profileArgs + "&extend=2" + offsetArg + overlayArgs;
 		}
 		// We can't 100% trust loading.audio, but we can trust it enough to use it as a hint for the GUI.
 		volumeIconHelper.setEnabled(loading.audio);
@@ -14225,7 +15650,7 @@ function FetchH264VideoModule()
 		if (startPaused)
 		{
 			self.Playback_Pause(); // If opening the stream while paused, the stream will stop after one frame.
-			safeFetch.OpenStream(videoUrl, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded);
+			safeFetch.OpenStream(videoUrl, headerCallback, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded, fetchOptions);
 		}
 		else
 		{
@@ -14233,10 +15658,14 @@ function FetchH264VideoModule()
 			playbackControls.setPlayPauseButtonState(playbackPaused);
 			// Calling StopStream before opening the new stream will drop any buffered frames in the decoder, allowing the new stream to begin playback immediately.
 			StopStreaming();
-			safeFetch.OpenStream(videoUrl, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded);
+			safeFetch.OpenStream(videoUrl, headerCallback, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded, fetchOptions);
 		}
 		UpdateCurrentURL();
 		BI_CustomEvent.Invoke("OpenVideo", loading);
+	}
+	var headerCallback = function (headers)
+	{
+		videoPlayer.GroupLayoutMetadataReceived(loading.id, headers.get("X-CAMLIST"), headers.get("X-RECLIST"));
 	}
 	var acceptFrame = function (frame, streams)
 	{
@@ -14267,7 +15696,7 @@ function FetchH264VideoModule()
 						PlaybackReachedNaturalEnd(1);
 					}, loading.msec);
 				}
-				jpegPreviewModule.RenderDataURI(frame.startTime, loading.uniqueId, frame.jpeg);
+				jpegPreviewModule.RenderDataURI(frame.startTime, loading.uniqueId, frame.jpeg, frame.utc);
 			}
 			else
 			{
@@ -14337,13 +15766,10 @@ function FetchH264VideoModule()
 		cornerStatusIcons.Set("trigger", status.bTriggered);
 		cornerStatusIcons.Set("recording", status.bRec);
 
-		if (lastStatusBlock)
-		{
-			if (status.bMotion && !lastStatusBlock.bMotion)
-				biSoundPlayer.PlayEvent("motion");
-			if (status.bTriggered && !lastStatusBlock.bTriggered)
-				biSoundPlayer.PlayEvent("trigger");
-		}
+		if (status.bMotion && (!lastStatusBlock || !lastStatusBlock.bMotion))
+			biSoundPlayer.PlayEvent("motion");
+		if (status.bTriggered && (!lastStatusBlock || !lastStatusBlock.bTriggered))
+			biSoundPlayer.PlayEvent("trigger");
 
 		BI_CustomEvent.Invoke("Video Status Block", arguments);
 
@@ -14360,13 +15786,15 @@ function FetchH264VideoModule()
 	}
 	this.GetLastSnapshotUrl = function ()
 	{
+		// This is the H.264 video player.
+		var sizeQualityArgs = JpegSnapshotArgs(loading);
+		var groupArgs = groupCfg.GetUrlArgs(loading);
 		if (loading.isLive)
-		{
-			var groupArgs = loading.isGroup ? groupCfg.GetUrlArgs(loading.id) : "";
-			return currentServer.remoteBaseURL + "image/" + loading.path + '?time=' + Date.now() + groupArgs + currentServer.GetAPISessionArg("&", true);
-		}
+			return currentServer.remoteBaseURL + "image/" + loading.path + '?time=' + Date.now() + groupArgs + currentServer.GetAPISessionArg("&", true) + sizeQualityArgs;
+		else if (loading.isTimeline())
+			return currentServer.remoteBaseURL + "time/" + loading.path + '?jpeg&isolate&pos=' + videoPlayer.lastFrameUtc.dropDecimalsStr() + groupArgs + currentServer.GetAPISessionArg("&", true) + sizeQualityArgs + clipOverlayCfg.GetUrlArgs("*ui3_timeline_pseudocam");
 		else
-			return currentServer.remoteBaseURL + "file/clips/" + loading.path + '?time=' + self.GetClipPlaybackPositionMs() + currentServer.GetAPISessionArg("&", true) + clipOverlayCfg.GetUrlArgs(loading.id);
+			return currentServer.remoteBaseURL + "file/clips/" + loading.path + '?time=' + self.GetClipPlaybackPositionMs() + currentServer.GetAPISessionArg("&", true) + sizeQualityArgs + clipOverlayCfg.GetUrlArgs(loading.id);
 	}
 	this.GetLastSnapshotFullUrl = function ()
 	{
@@ -14382,10 +15810,6 @@ function FetchH264VideoModule()
 			return loading.uniqueId;
 		else
 			return "";
-	}
-	this.GetCurrentImageTimeMs = function ()
-	{
-		return currentImageDateMs;
 	}
 	this.GetOffsetFromStartMs = function ()
 	{
@@ -14454,6 +15878,9 @@ function FetchH264VideoModule()
 	{
 		if (loading.isLive)
 			currentSeekPositionPercent = 0;
+		else if (loading.isTimeline())
+		{
+		}
 		else
 		{
 			if (currentSeekPositionPercent >= 1 && !playbackControls.GetPlayReverse())
@@ -14462,7 +15889,27 @@ function FetchH264VideoModule()
 				currentSeekPositionPercent = 1;
 			currentSeekPositionPercent = Clamp(currentSeekPositionPercent, 0, 1);
 		}
-		self.OpenVideo(loading, currentSeekPositionPercent, playbackPaused);
+		self.OpenVideo(loading.UpdateTimelineStart(), currentSeekPositionPercent, playbackPaused);
+	}
+	/** Handler for "afterResized" custom event. The video viewport may have resized, or layout may have just been re-done. */
+	function AfterResized()
+	{
+		if (isCurrentlyActive && cameraListLoader.isDynamicLayoutEnabled(loading.id) && !groupCfg.GetLockedResolution(loading))
+		{
+			var sizeToRequest = imageRenderer.GetSizeToRequest(loading, genericQualityHelper.GetCurrentProfile(), true);
+			if (!sizeToRequest.Equals(lastRequestedSize))
+				AfterResized2Debounced();
+		}
+	}
+	/** Should only be called via [AfterResized2Debounced] when it has been confirmed that the ideal resolution of the video frame has changed. */
+	function AfterResized2()
+	{
+		if (isCurrentlyActive && cameraListLoader.isDynamicLayoutEnabled(loading.id) && !groupCfg.GetLockedResolution(loading))
+		{
+			var sizeToRequest = imageRenderer.GetSizeToRequest(loading, genericQualityHelper.GetCurrentProfile(), true);
+			if (!sizeToRequest.Equals(lastRequestedSize))
+				ReopenStreamAtCurrentSeekPosition();
+		}
 	}
 	var FrameRendered = function (frame)
 	{
@@ -14475,18 +15922,11 @@ function FetchH264VideoModule()
 		lastFrameMetadata.size = frame.size;
 		lastFrameMetadata.expectedInterframe = frame.expectedInterframe;
 
-		currentImageDateMs = frame.utc;
 		currentSeekPositionPercent = frame.rawtime / loading.msec;
 
-		if (loadDynamicGroupLayout)
-		{
-			loadDynamicGroupLayout = false;
-			cameraListLoader.AsyncLoadDynamicGroupRects(loading.uniqueId, frame.width + "x" + frame.height);
-		}
-
 		var timeNow = performance.now();
-		videoPlayer.ImageRendered(loading.uniqueId, frame.width, frame.height, lastFrameAt - timeNow, new Date(frame.utc));
-		if (loading.isLive)
+		videoPlayer.ImageRendered({ id: loading.uniqueId, w: frame.width, h: frame.height, loadingTime: lastFrameAt - timeNow, utc: frame.utc, isFirstFrame: lastStreamBeganAt === lastFrameAt });
+		if (loading.isLive || loading.isTimeline())
 			playbackControls.FrameTimestampUpdated(false);
 		else
 			playbackControls.FrameTimestampUpdated(frame.utc);
@@ -14550,6 +15990,11 @@ function FetchH264VideoModule()
 			volumeIconHelper.setColorIdle();
 		if (loading.isLive)
 			return;
+		if (loading.isTimeline())
+		{
+			toaster.Info("Timeline playback ended unexpectedly."); // This toast message could be removed if it isn't helpful.
+			return;
+		}
 		var reverse = playbackControls.GetPlayReverse();
 		if (reverse)
 			currentSeekPositionPercent = 0;
@@ -14563,6 +16008,7 @@ function FetchH264VideoModule()
 			perfNow = performance.now();
 		if (nerdStats.IsOpen())
 		{
+			var loaded = videoPlayer.Loaded().image;
 			var codecs = "h264";
 			if (streamHasAudio == 1 && audioCodec)
 				codecs += ", " + audioCodec;
@@ -14585,12 +16031,21 @@ function FetchH264VideoModule()
 				if (loading.fullwidth !== frame.width || loading.fullheight !== frame.height)
 					nativeRes = '<span class="nonMatchingNativeRes">' + nativeRes + '</span>';
 			}
+			var digitalZoom = '<span title="Digital Zoom Factor"> \uD83D\uDD0D' + imageRenderer.zoomHandler.GetZoomFactor().toFixed(2) + 'x</span>';
 
 			nerdStats.BeginUpdate();
-			nerdStats.UpdateStat("Viewport", null, $layoutbody.width() + "x" + $layoutbody.height() + GetDevicePixelRatioTag());
+			nerdStats.UpdateStat("Viewport", null, $layoutbody.width() + "x" + $layoutbody.height() + GetDevicePixelRatioTag() + digitalZoom);
 			nerdStats.UpdateStat("Stream Resolution", null, frame.width + "x" + frame.height + nativeRes);
-			nerdStats.UpdateStat("Seek Position", (loading.isLive ? "LIVE" : ((frame.pos / 100).toFixed() + "%")) + " (Frame Offset: " + frame.timestamp + "ms)");
+			if (!loaded.getActualRect().Equals(loaded.getRequestedRect()))
+				nerdStats.UpdateStat("Requested Res", null, '<span class="requestedRes">' + loaded.getRequestedRect().toString() + '</span>');
+			if (loading.isLive)
+				nerdStats.UpdateStat("Seek Position", "LIVE");
+			else if (loading.isTimeline())
+				nerdStats.UpdateStat("Seek Position", MsToDHMS(videoPlayer.lastFrameUtc - GetUtcNow(), false, true));
+			else
+				nerdStats.UpdateStat("Seek Position", (frame.pos / 100).toFixed() + "%");
 			nerdStats.UpdateStat("Frame Time", GetDateStr(new Date(frame.utc + GetServerTimeOffset()), true));
+			nerdStats.UpdateStat("Stream Timestamp", frame.timestamp + "ms");
 			nerdStats.UpdateStat("Codecs", codecs);
 			nerdStats.UpdateStat("Video Bit Rate", bitRate_Video, formatBitsPerSecond(bitRate_Video, 1), true);
 			nerdStats.UpdateStat("Audio Bit Rate", bitRate_Audio, formatBitsPerSecond(bitRate_Audio, 1), true);
@@ -15750,6 +17205,7 @@ function FrameMetadataQueue()
 ///////////////////////////////////////////////////////////////
 // HTML5 + Media Source Extensions Player /////////////////////
 ///////////////////////////////////////////////////////////////
+var jmuxerDeveloperMode = false;
 function HTML5_MSE_Player($startingContainer, frameRendered, PlaybackReachedNaturalEndCB, playerErrorHandler)
 {
 	var self = this;
@@ -15858,6 +17314,7 @@ function HTML5_MSE_Player($startingContainer, frameRendered, PlaybackReachedNatu
 			if (allQueuedFrames.length > 0)
 				finishFramesToTime(allQueuedFrames[allQueuedFrames.length - 1].time);
 		}
+		HTML5VideoBreakDetector.NotifyWaitingState();
 	}
 	var dropFrame = function ()
 	{
@@ -15968,6 +17425,7 @@ function HTML5_MSE_Player($startingContainer, frameRendered, PlaybackReachedNatu
 			jmuxer.destroy();
 			jmuxer = null;
 		}
+		HTML5VideoBreakDetector.Reset();
 		hasToldPlayerToPlay = false;
 		player.pause();
 		delayCompensation = new HTML5DelayCompensationHelper(player);
@@ -16048,7 +17506,7 @@ function HTML5_MSE_Player($startingContainer, frameRendered, PlaybackReachedNatu
 				clearBuffer: true,
 				cleanOffset: 600, // This is an extension of the original jmuxer.
 				onReady: onMSEReady,
-				debug: developerMode
+				debug: jmuxerDeveloperMode
 			});
 		}
 		if (!mseReady)
@@ -16058,6 +17516,12 @@ function HTML5_MSE_Player($startingContainer, frameRendered, PlaybackReachedNatu
 		}
 
 		acceptedFrameCount++;
+		if (HTML5VideoBreakDetector.CheckForBreak(player, acceptedFrameCount, finishedFrameCount))
+		{
+			toaster.Warning("Detected HTML5 video player stall. Reopening video stream.", 5000);
+			videoPlayer.ReopenStreamAtCurrentSeekPosition();
+			return;
+		}
 		timestampLastAcceptedFrame = frame.time;
 		lastFrameReceivedAt = performance.now();
 		netDelayCalc.Frame(frame.time, lastFrameReceivedAt);
@@ -16164,10 +17628,19 @@ function HTML5DelayCompensationHelper(player)
 	{
 		if (lastSetRate !== rate)
 		{
-			player.playbackRate = rate;
-			if (player.playbackRate !== rate)
+			var ex = null;
+			try
 			{
-				console.log("HTML5 Delay Compensator failed to set playback rate to " + rate, player.playbackRate);
+				player.playbackRate = rate;
+			}
+			catch (e)
+			{
+				ex = e;
+			}
+			if (ex || player.playbackRate !== rate)
+			{
+				var errMsg = ex ? ex : "no exception was thrown";
+				console.log("HTML5 Delay Compensator failed to set playback rate to " + rate, player.playbackRate, errMsg);
 				nextPlaybackRateChangeAllowedAt = performance.now() + 10000;
 			}
 			lastSetRate = rate;
@@ -16342,6 +17815,69 @@ function HTML5BetterFrameTiming(video, callback)
 	}
 	timeCheck();
 }
+var HTML5VideoBreakDetector = new (function ()
+{
+	var playerWasReady = false;
+	var isWaitingState = false;
+	var didPlayAFrame = false;
+	var lastFinishedFrameCount = 0;
+	var lastFrameRenderedAtTime = 0;
+	var lastStallAtTime = -1;
+	var stallTimeout = 2000;
+
+	this.Reset = function ()
+	{
+		playerWasReady = false;
+		isWaitingState = false;
+		didPlayAFrame = false;
+		lastFinishedFrameCount = 0;
+		lastFrameRenderedAtTime = performance.now();
+		lastStallAtTime = -1;
+	}
+	this.NotifyWaitingState = function ()
+	{
+		isWaitingState = true;
+	}
+	/**
+	 * Returns true if it is believed that the HTML5 video player is in a broken state.
+	 * @param {Object} player HTML5 video player
+	 * @param {Number} acceptedFrameCount Number of frames accepted from the network.
+	 * @param {Number} finishedFrameCount Number of frames rendered.
+	 * @returns {Boolean} Returns true if it is believed that the HTML5 video player is in a broken state.
+	 */
+	this.CheckForBreak = function (player, acceptedFrameCount, finishedFrameCount)
+	{
+		var now = performance.now();
+		if (lastFinishedFrameCount !== finishedFrameCount)
+		{
+			didPlayAFrame = true;
+			isWaitingState = false;
+			lastFinishedFrameCount = finishedFrameCount;
+			lastFrameRenderedAtTime = now;
+		}
+		if (playerWasReady)
+		{
+			if (didPlayAFrame && isWaitingState && acceptedFrameCount - finishedFrameCount >= 5 && player.readyState < 3)
+			{
+				if (lastStallAtTime < 0)
+					lastStallAtTime = now;
+				if (now - lastFrameRenderedAtTime > stallTimeout && now - lastStallAtTime > stallTimeout)
+				{
+					stallTimeout += 2000; // Add 2 seconds to stall time each time a stall is detected, so that on badly-behaving systems it won't be as disruptive.
+					return true;
+				}
+			}
+			else
+				lastStallAtTime = -1;
+		}
+		else if (player.readyState >= 3)
+		{
+			playerWasReady = true;
+			lastStallAtTime = -1;
+		}
+		return false;
+	}
+})();
 ///////////////////////////////////////////////////////////////
 // Network Delay Calculator - An Imperfect Science ////////////
 ///////////////////////////////////////////////////////////////
@@ -16482,103 +18018,105 @@ function ImageRenderer()
 	previousImageDraw.z = 10;
 
 	this.minGroupImageDimension = 240; // Strictly >= 240 or else dynamic group layouts are broken
-	this.maxGroupImageDimension = 3000; // Strictly <= 7680 or else dynamic group layouts are broken
+	// Max group image dimension is now a ui setting.
 
 	var $layoutbody = $("#layoutbody");
 	var $camimg_wrapper = $("#camimg_wrapper");
 	var sccc_outerObjs = $('#layoutbody,#camimg_wrapper,#zoomhint');
 
-	this.zoomHandler = null;
+	this.zoomHandler = zoomHandler_Adjustable;
 
-	this.GetSizeToRequest = function (modifyForJpegQualitySetting, ciLoading)
+	this.GetNativeSize = function (ciLoading)
 	{
-		// Calculate the size of the image we need
-		var ssFactor = parseFloat(settings.ui3_jpegSupersampling);
-		if (isNaN(ssFactor) || ssFactor < 0.01 || ssFactor > 2)
-			ssFactor = 1;
-		var zoomFactor = self.zoomHandler.GetZoomFactor();
+		if (!ciLoading)
+			ciLoading = videoPlayer.Loading().image;
 
-		var bodyW = $layoutbody.width();
-		var bodyH = $layoutbody.height();
-		var srcNativeWidth = ciLoading.fullwidth;
-		var srcNativeHeight = ciLoading.fullheight;
-		var resizableSource = cameraListLoader.isDynamicLayoutEnabled(ciLoading.id);
-		if (resizableSource)
+		var x;
+		var isDynamicResolutionSource = cameraListLoader.isDynamicLayoutEnabled(ciLoading.id);
+		if (isDynamicResolutionSource)
 		{
-			var lockedResolution = groupCfg.GetLockedResolution(ciLoading.id);
+			var lockedResolution = groupCfg.GetLockedResolution(ciLoading);
 			if (lockedResolution)
-			{
-				srcNativeWidth = lockedResolution.w;
-				srcNativeHeight = lockedResolution.h;
-			}
+				x = lockedResolution; // This dynamic-resolution video source has a preferred size saved.
 			else
-			{
-				srcNativeWidth = bodyW;
-				srcNativeHeight = bodyH;
-			}
-		}
-		var srcNativeAspect = srcNativeWidth / srcNativeHeight;
-		var imgDrawWidth = srcNativeWidth * dpiScalingFactor * ssFactor;
-		var imgDrawHeight = srcNativeHeight * dpiScalingFactor * ssFactor;
-
-		SetIntendedSize(ciLoading, imgDrawWidth, imgDrawHeight);
-
-		imgDrawWidth *= zoomFactor;
-		imgDrawHeight *= zoomFactor;
-		if (imgDrawWidth === 0)
-		{
-			// Image is supposed to scale to fit the screen (first zoom level)
-			imgDrawWidth = bodyW * dpiScalingFactor * ssFactor;
-			imgDrawHeight = bodyH * dpiScalingFactor * ssFactor;
-
-			var availableRatio = imgDrawWidth / imgDrawHeight;
-			if (availableRatio < srcNativeAspect)
-				imgDrawHeight = imgDrawWidth / srcNativeAspect;
-			else
-				imgDrawWidth = imgDrawHeight * srcNativeAspect;
-		}
-		if (srcNativeAspect < 1)
-		{
-			if (modifyForJpegQualitySetting)
-				imgDrawHeight = jpegQualityHelper.ModifyImageDimension("h", imgDrawHeight);
-			imgDrawWidth = imgDrawHeight * srcNativeAspect;
+				x = new ui3Rect($layoutbody.width(), $layoutbody.height()); // Size this dynamic-resolution video according to the viewport
+			x.MultiplyBy(100000); // Drastically enlarge so that it will fill the bounding box later.
+			// Apply dynamic stream limits
+			x.ApplyBoundingBox(new ui3Rect(self.getMaxGroupImageDimension(), self.getMaxGroupImageDimension()));
+			x.ExpandAround(new ui3Rect(self.minGroupImageDimension, self.minGroupImageDimension));
 		}
 		else
-		{
-			if (modifyForJpegQualitySetting)
-				imgDrawWidth = jpegQualityHelper.ModifyImageDimension("w", imgDrawWidth);
-			imgDrawHeight = imgDrawWidth / srcNativeAspect;
-		}
-
-		// Do not request a dimension larger than 7680.  Resizable group streams will revert to a standard size.
-		if (resizableSource)
-		{
-			var aspect = (imgDrawWidth / imgDrawHeight);
-			if (imgDrawWidth > self.maxGroupImageDimension)
-			{
-				imgDrawWidth = self.maxGroupImageDimension;
-				imgDrawHeight = imgDrawWidth / aspect;
-			}
-			if (imgDrawHeight > self.maxGroupImageDimension)
-			{
-				imgDrawHeight = self.maxGroupImageDimension;
-				imgDrawWidth = imgDrawHeight * aspect;
-			}
-		}
-
-		// Now we have the size we need.  Determine what argument we will send to Blue Iris
-		return { w: parseInt(Math.round(imgDrawWidth)), h: parseInt(Math.round(imgDrawHeight)) };
+			x = ciLoading.getFullRect(); // Use the video source metadata's native resolution
+		return x;
 	}
-
-	this.ViewportCanSupportDynamicGroupLayout = function ()
+	/**
+	 * Returns a ui3Rect defining the dimensions OF JPEG IMAGE to request for a given video source. NOT USABLE FOR H.264 YET
+	 * Considers:
+	 * * Display dpi / browser zoom level
+	 * * Video player zoom level
+	 * * UI settings such as jpeg supersampling
+	 * * Requirements of the given streaming profile
+	 * * Viewport dimensions
+	 * * Dynamic group layouts
+	 * @param {BICameraData} ciLoading BICameraData to consider for image loading.  If omitted, the currently loading image object is used (videoPlayer.Loading().image).
+	 * @param {StreamingProfile} streamingProfile Streaming profile to confine the returned dimensions.  If omitted, the currently selected streaming profile will be used.
+	 * @param {Boolean} doNotRemember If true, the dynamicNative properties of the video source will NOT be set.  Pass true if the size being requested will not be used to load video.
+	 */
+	this.GetSizeToRequest = function (ciLoading, streamingProfile, doNotRemember)
 	{
-		var ssFactor = parseFloat(settings.ui3_jpegSupersampling);
-		if (isNaN(ssFactor) || ssFactor < 0.01 || ssFactor > 2)
-			ssFactor = 1;
-		var bodyW = $layoutbody.width();
-		var bodyH = $layoutbody.height();
-		return (bodyW * dpiScalingFactor * ssFactor) >= self.minGroupImageDimension
-			&& (bodyH * dpiScalingFactor * ssFactor) >= self.minGroupImageDimension;
+		if (!ciLoading)
+			ciLoading = videoPlayer.Loading().image;
+		if (!streamingProfile)
+			streamingProfile = genericQualityHelper.GetCurrentProfile();
+
+		/** The size we want the video stream to be. */
+		var x = self.GetNativeSize(ciLoading);
+
+		if (!streamingProfile.isHQSnapshot && !doNotRemember)
+			SetDynamicNativeSize(ciLoading, x.w, x.h);
+
+		var isDynamicResolutionSource = cameraListLoader.isDynamicLayoutEnabled(ciLoading.id);
+		if (streamingProfile.vcodec == "jpeg" && !streamingProfile.isHQSnapshot)
+		{
+			// We can limit this request size if the zoom factor is less than 1
+			var zoomFactor = self.zoomHandler.GetZoomFactor(ciLoading);
+			if (zoomFactor < 1)
+			{
+				var ssFactor = parseFloat(settings.ui3_jpegSupersampling);
+				if (isNaN(ssFactor) || ssFactor < 0.01 || ssFactor > 2)
+					ssFactor = 1;
+
+				var scaleFactor = dpiScalingFactor * ssFactor;
+				if (isDynamicResolutionSource)
+				{
+					var fit = self.zoomHandler.GetFittingZoomFactor(ciLoading);
+					if (zoomFactor < fit || self.zoomHandler.zoomsEqual(zoomFactor, fit))
+					{
+						var viewportRect = new ui3Rect($layoutbody.width(), $layoutbody.height())
+							.MultiplyBy(scaleFactor);
+						x.ApplyBoundingBox(viewportRect);
+					}
+				}
+				else
+					x.MultiplyBy(zoomFactor * scaleFactor);
+			}
+		}
+
+		// Honor resolution limit of streaming profile.
+		var profileBoundingBox = streamingProfile.GetRect();
+		if (profileBoundingBox)
+		{
+			if (profileBoundingBox.AspectRatio() < 1 !== x.AspectRatio() < 1)
+				profileBoundingBox.Rotate(); // Profile is different aspect ratio from video stream. Rotate the profile.
+			x.ApplyBoundingBox(profileBoundingBox);
+		}
+
+		if (isDynamicResolutionSource || ciLoading.isTimeline()) // All timeline video uses dynamic group sizing logic so these minimum dimensions apply.
+			x.ExpandAround(new ui3Rect(self.minGroupImageDimension, self.minGroupImageDimension));
+
+		x.Round().MakeDivisibleBy8();
+
+		return x;
 	}
 	this.SetMousePos = function (x, y)
 	{
@@ -16595,6 +18133,8 @@ function ImageRenderer()
 	}
 	this.ImgResized = function (isFromKeyboard)
 	{
+		imageRenderer.zoomHandler.notifyImageResized();
+
 		dpiScalingFactor = BI_GetDevicePixelRatio();
 
 		var imgAvailableWidth = $layoutbody.width();
@@ -16609,41 +18149,22 @@ function ImageRenderer()
 		var resizableSource = cameraListLoader.isDynamicLayoutEnabled(imgForSizing.id);
 		if (resizableSource)
 		{
-			widthForSizing = imgForSizing.intendedW;
-			heightForSizing = imgForSizing.intendedH;
+			widthForSizing = imgForSizing.dynamicNativeW;
+			heightForSizing = imgForSizing.dynamicNativeH;
 			if (!widthForSizing || !heightForSizing)
 			{
 				widthForSizing = imgForSizing.actualwidth;
 				heightForSizing = imgForSizing.actualheight;
 			}
 		}
-		else if (settings.ui3_zoom1x_mode === "Stream")
-		{
-			widthForSizing = imgForSizing.actualwidth;
-			heightForSizing = imgForSizing.actualheight;
-		}
 		else
 		{
 			widthForSizing = imgForSizing.fullwidth;
 			heightForSizing = imgForSizing.fullheight;
 		}
-		var imgDrawWidth = widthForSizing * zoomFactor;
-		var imgDrawHeight = heightForSizing * zoomFactor;
-		if (imgDrawWidth === 0)
-		{
-			imgDrawWidth = imgAvailableWidth;
-			imgDrawHeight = imgAvailableHeight;
-
-			var aspectRatio = widthForSizing / heightForSizing;
-			var newRatio = imgDrawWidth / imgDrawHeight;
-			if (newRatio < aspectRatio)
-				imgDrawHeight = imgDrawWidth / aspectRatio;
-			else
-				imgDrawWidth = imgDrawHeight * aspectRatio;
-			$camimg_wrapper.css("width", imgDrawWidth + "px").css("height", imgDrawHeight + "px");
-		}
-		else
-			$camimg_wrapper.css("width", widthForSizing + "px").css("height", heightForSizing + "px");
+		var imgDrawWidth = Math.max(1, widthForSizing * zoomFactor);
+		var imgDrawHeight = Math.max(1, heightForSizing * zoomFactor);
+		$camimg_wrapper.css("width", widthForSizing + "px").css("height", heightForSizing + "px");
 
 		imageIsLargerThanAvailableSpace = imgDrawWidth > imgAvailableWidth || imgDrawHeight > imgAvailableHeight;
 
@@ -16702,29 +18223,26 @@ function ImageRenderer()
 		previousImageDraw.z = zoomFactor;
 
 		// Css scaling shim:
-		if (zoomFactor > 1)
-		{
-			proposedX += (widthForSizing * (zoomFactor - 1)) / 2;
-			proposedY += (heightForSizing * (zoomFactor - 1)) / 2;
-		}
+		proposedX += (widthForSizing * (zoomFactor - 1)) / 2;
+		proposedY += (heightForSizing * (zoomFactor - 1)) / 2;
 
 		var transform = "translate(" + proposedX + "px, " + proposedY + "px)";
-		if (zoomFactor > 1)
-			transform += " scale(" + zoomFactor + ")";
+		transform += " scale(" + zoomFactor + ")";
 		$camimg_wrapper.css("transform", transform);
 
 		BI_CustomEvent.Invoke("ImageResized");
 	}
 	this.DigitalZoomNow = function (deltaY, isFromKeyboard)
 	{
-		self.setZoomHandler();
 		self.zoomHandler.OffsetZoom(deltaY);
-
+		AfterZoom(isFromKeyboard);
+	}
+	var AfterZoom = function (isFromKeyboard)
+	{
 		$("#zoomhint").stop(true, true);
 		$("#zoomhint").show();
 		zoomHintIsVisible = true;
-		var zoomFactor = self.zoomHandler.GetZoomFactor();
-		$("#zoomhint").html(zoomFactor === 0 ? "Fit" : ((Math.round(zoomFactor * 10) / 10) + "x"));
+		$("#zoomhint").html(GetDigitalZoomLabel());
 		RepositionZoomHint(isFromKeyboard);
 		if (zoomHintTimeout !== null)
 			clearTimeout(zoomHintTimeout);
@@ -16741,6 +18259,31 @@ function ImageRenderer()
 		self.ImgResized(isFromKeyboard);
 
 		SetCamCellCursor();
+	}
+	var GetDigitalZoomLabel = function ()
+	{
+		var fit = self.zoomHandler.GetFittingZoomFactor();
+		var zoomFactor = self.zoomHandler.GetZoomFactor();
+		var rounded = zoomFactor < 1 ? (Math.round(zoomFactor * 100) / 100) : (Math.round(zoomFactor * 10) / 10);
+		if (rounded === 1)
+		{
+			// Only show "1x" if it is exactly 1x.  Otherwise round down or up.
+			if (zoomFactor < 1)
+				rounded -= 0.01;
+			else if (zoomFactor > 1)
+				rounded += 0.1;
+		}
+
+		var text = rounded + "x";
+		var isOne = self.zoomHandler.zoomsEqual(1, zoomFactor);
+		var isFit = self.zoomHandler.zoomsEqual(fit, zoomFactor);
+		if (isOne && isFit)
+			text += " (Best Fit, Native)";
+		else if (isOne)
+			text += " (Native)";
+		else if (isFit)
+			text += " (Best Fit)";
+		return text;
 	}
 	this.DigitalPan = function (dx, dy)
 	{
@@ -16820,37 +18363,102 @@ function ImageRenderer()
 	}
 	$layoutbody.on('wheel', function (e)
 	{
-		if (typeof e.deltaY === "undefined")
-		{
-			e.deltaX = e.originalEvent.deltaX;
-			e.deltaY = -e.originalEvent.deltaY;
-			e.deltaMode = e.originalEvent.deltaMode;
-		}
-		handleMouseWheelEvent(e, e.delta, e.deltaX, e.deltaY, e.deltaMode);
-	});
-	var handleMouseWheelEvent = function (e, delta, deltaX, deltaY, deltaMode)
-	{
 		if (playbackControls.MouseInSettingsPanel(e))
 			return;
 		mouseCoordFixer.fix(e);
 		self.SetMousePos(e.mouseX, e.mouseY);
 		e.preventDefault();
-		if (deltaMode === 1)
-			deltaY *= 33.333;
-		else if (deltaMode === 2)
-			deltaY *= 100;
+		var ne = normalizeWheelEvent(e.originalEvent);
+		var deltaY = ne.spinY;
+		deltaY *= -1; // Invert wheel delta so that wheel up is zoom in by default.
 		if (settings.ui3_wheelZoomReverse === "1")
 			deltaY *= -1;
 		self.DigitalZoomNow(deltaY, false);
-	}
-	this.setZoomHandler = function ()
+	});
+
+	var hammertime;
+	var pinchZoomState = { lastScale: 0, startingZoomFactor: 0, active: false };
+	var toast;
+	function onPinchStart(e)
 	{
-		if (settings.ui3_wheelZoomMethod === "Adjustable")
-			self.zoomHandler = zoomHandler_Adjustable;
-		else
-			self.zoomHandler = zoomHandler_Legacy;
+		if (settings.ui3_browserZoomEnabled !== "1")
+		{
+			pinchZoomState.active = true;
+			pinchZoomState.startingZoomFactor = self.zoomHandler.GetZoomFactor(videoPlayer.Loaded().image);
+			e.mouseX = e.center.x;
+			e.mouseY = e.center.y;
+			self.CamImgDragStart(e);
+		}
 	}
-	self.setZoomHandler();
+	function onPinchMove(e)
+	{
+		if (!pinchZoomState.active)
+			return;
+		e.mouseX = e.center.x;
+		e.mouseY = e.center.y;
+		self.CamImgDragMove(e);
+
+		var zoomSpeed = Clamp(parseFloat(settings.ui3_wheelAdjustableSpeed), 200, 2000);
+		zoomSpeed /= 400; // Make it a number between 0.05 and 5, where default is 1
+
+		var speedExponent = zoomSpeed;
+		var scale = Math.pow(e.scale, speedExponent);
+
+		var szf = pinchZoomState.startingZoomFactor;
+		var zf = szf * Math.max(0.001, scale);
+		self.zoomHandler.SetZoomFactor(zf);
+		AfterZoom(false);
+	}
+	function onPinchEnd(e)
+	{
+		if (!pinchZoomState.active)
+			return;
+		e.mouseX = e.center.x;
+		e.mouseY = e.center.y;
+		self.CamImgDragEnd(e);
+		pinchZoomState.active = false;
+	}
+	this.onToggleBrowserZoom = function ()
+	{
+		if (settings.ui3_browserZoomEnabled === "1")
+		{
+			if (hammertime)
+			{
+				ReloadToTakeEffectToast();
+				// The following hammer destruction methods do not re-enable native browser zoom over the video player.
+				hammertime.off('pinchstart pinchmove pinchend');
+				hammertime.get('pinch').set({ enable: false });
+				hammertime.stop(true);
+				hammertime.destroy();
+				hammertime = null;
+				imageRenderer.zoomHandler.ZoomToFit();
+				resized();
+			}
+		}
+		else
+		{
+			if (!hammertime)
+			{
+				DestroyReloadToTakeEffectToast();
+				hammertime = new Hammer($layoutbody.get(0));
+				hammertime.get('pinch').set({ enable: true });
+				hammertime.on('pinchstart', onPinchStart);
+				hammertime.on('pinchmove', onPinchMove);
+				hammertime.on('pinchend', onPinchEnd);
+			}
+		}
+	}
+	/**
+	 * Returns the max group image dimension setting, clamped within required boundaries.
+	 */
+	this.getMaxGroupImageDimension = function ()
+	{
+		var d = parseInt(settings.ui3_maxDynamicGroupImageDimension);
+		if (!d || isNaN(d))
+			return 1280;
+		else
+			return Math.min(d, 7680); // Strictly <= 7680 or else dynamic group layouts are broken
+	}
 }
 ///////////////////////////////////////////////////////////////
 // Digital Zoom ///////////////////////////////////////////////
@@ -16858,69 +18466,117 @@ function ImageRenderer()
 var zoomHandler_Adjustable = new (function ()
 {
 	var self = this;
-	var zoomIndex = 0; // All values less than 1 are treated as "zoom to fit".
-	var maxZoomFactor = Math.sqrt(Math.sqrt(50));
+	var $layoutbody = $("#layoutbody");
+	var absoluteMinZoomFactor = 0.000001;
+	var absoluteMinZoomScaler = Math.log2(absoluteMinZoomFactor); // About -20
+	var maxZoomScaler = Math.log2(50); // About 5.6
+	var _zoomScaler = absoluteMinZoomScaler;
+	var wasZoomedToFit = true;
+	var defaultZoomStep = maxZoomScaler / 29; // 30 zoom levels with a standard wheel mouse, including "fit", same as legacy zoom handler.
 	this.OffsetZoom = function (deltaY)
 	{
-		if (deltaY > 100)
-			deltaY = 100;
-		else if (deltaY < -100)
-			deltaY = -100;
-		var speed = Clamp(2001 - parseFloat(settings.ui3_wheelAdjustableSpeed), 1, 2000);
-		var delta = deltaY / speed;
-		if (delta > 0 && zoomIndex < 1)
-			zoomIndex = 1; // This ensures we always hit "1x" zoom precisely when zooming in.
-		else
-		{
-			var wasGreaterThan1 = zoomIndex > 1;
-			zoomIndex += delta;
-			if (zoomIndex < 1 && wasGreaterThan1)
-				zoomIndex = 1; // This ensures we always hit "1x" zoom precisely when zooming out.
-			if (zoomIndex < 1)
-				zoomIndex = 0;
-			if (zoomIndex > maxZoomFactor)
-				zoomIndex = maxZoomFactor;
-		}
+		var zoomSpeed = Clamp(parseFloat(settings.ui3_wheelAdjustableSpeed), 20, 2000);
+		zoomSpeed /= 400;
+		// zoomSpeed is now a multiplier between 2% and 500%.
+		var delta = deltaY * defaultZoomStep * zoomSpeed;
+		self.SetZoomScaler(self.GetZoomScaler() + delta);
 	}
-	this.GetZoomFactor = function ()
+	this.GetZoomFactor = function (image)
 	{
-		var zoomFactor = Math.pow(zoomIndex, 4);
-		if (zoomFactor < 1)
-			zoomFactor = 0;
-		else if (zoomFactor > 50)
-			zoomFactor = 50;
-		if (isNaN(zoomFactor))
-			zoomFactor = 0;
+		var zoomFactor = Math.pow(2, self.GetZoomScaler(image));
 		return zoomFactor;
 	}
-	this.ZoomToFit = function ()
+	this.SetZoomFactor = function (zoomFactor)
 	{
-		zoomIndex = 0;
+		self.SetZoomScaler(Math.log2(zoomFactor));
 	}
-})();
-var zoomHandler_Legacy = new (function ()
-{
-	var self = this;
-	var zoomTable = [0, 1, 1.2, 1.4, 1.6, 1.8, 2, 2.5, 3, 3.5, 4, 4.5, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 23, 26, 30, 35, 40, 45, 50];
-	var digitalZoom = 0;
-	this.OffsetZoom = function (deltaY)
+	this.ZoomToFit = function (image)
 	{
-		if (deltaY < 0)
-			digitalZoom -= 1;
-		else if (deltaY > 0)
-			digitalZoom += 1;
-		if (digitalZoom < 0)
-			digitalZoom = 0;
-		else if (digitalZoom >= zoomTable.length)
-			digitalZoom = zoomTable.length - 1;
+		_zoomScaler = self.GetFittingZoomScaler(image);
 	}
-	this.GetZoomFactor = function ()
+	this.GetFittingZoomScaler = function (image)
 	{
-		return zoomTable[digitalZoom];
+		return Math.log2(self.GetFittingZoomFactor(image));
 	}
-	this.ZoomToFit = function ()
+	this.GetFittingZoomFactor = function (image)
 	{
-		digitalZoom = 0;
+		if (!videoPlayer)
+			return 0;
+		var oneXSize;
+		if (!image)
+			image = videoPlayer.Loaded().image;
+		if (!image.id)
+			return absoluteMinZoomFactor;
+		if (cameraListLoader.isDynamicLayoutEnabled(image.id))
+			oneXSize = image.getDynamicNativeRect();
+		if (!oneXSize || !oneXSize.w || !oneXSize.h)
+			oneXSize = imageRenderer.GetNativeSize(image);
+
+		var viewport = new ui3Rect($layoutbody.width(), $layoutbody.height());
+		var fitting = oneXSize.Copy().ExpandAround(viewport).ApplyBoundingBox(viewport);
+		if (fitting.w > fitting.h)
+			return fitting.w / oneXSize.w;
+		else
+			return fitting.h / oneXSize.h;
+	}
+	var applyZoomScalerLimits = function (zs, fitZoomScaler)
+	{
+		var minZoomScaler = fitZoomScaler; //fitZoomScaler may be positive (> 1 zoom factor) or negative (0-1 zoom factor).
+		if (settings.ui3_alwaysAllow1xVideoZoom === "1")
+			minZoomScaler = Math.min(0, minZoomScaler); // Allow zooming out to 1x even if that is smaller than viewport.
+		zs = Math.max(zs, minZoomScaler);
+		return Clamp(zs, absoluteMinZoomScaler, maxZoomScaler);
+	}
+	this.SetZoomScaler = function (zs)
+	{
+		var fit = self.GetFittingZoomScaler();
+		if (isNaN(zs))
+			zs = fit;
+		// Ensures we always hit "fit" zoom precisely when zooming past it.
+		zs = borderGuard(_zoomScaler, zs, fit);
+		// Ensures we always hit "1x" zoom precisely when zooming past it.
+		zs = borderGuard(_zoomScaler, zs, 0);
+		_zoomScaler = applyZoomScalerLimits(zs, fit);
+		wasZoomedToFit = self.zoomsEqual(_zoomScaler, fit);
+	}
+	this.GetZoomScaler = function (image)
+	{
+		var fit = self.GetFittingZoomScaler(image);
+		var zs = applyZoomScalerLimits(_zoomScaler, fit);
+		if (fit < 0 && zs !== fit && self.zoomsNear(zs, 0))
+			return 0;
+		if (0 < fit && zs !== 0 && self.zoomsNear(zs, fit))
+			return fit;
+		return zs;
+	}
+	var borderGuard = function (oldValue, newValue, border)
+	{
+		// Don't allow the value to cross the border until it has already been at the border.
+		if (oldValue < border && newValue > border)
+			return border;
+		if (oldValue > border && newValue < border)
+			return border;
+		if (self.zoomsEqual(newValue, border) && !self.zoomsEqual(oldValue, border))
+			return border; // New value is really close to the border. Put it right on the border to avoid future precision errors.
+		return newValue;
+	}
+	this.zoomsEqual = function (a, b)
+	{
+		return Math.abs(a - b) < 0.0001;
+	}
+	this.zoomsNear = function (a, b)
+	{
+		return Math.abs(a - b) < 0.05;
+	}
+	this.notifyImageResized = function ()
+	{
+		if (wasZoomedToFit && videoPlayer && videoPlayer.Loaded().image.id)
+			self.ZoomToFit(videoPlayer.Loaded().image);
+	}
+	this.IsZoomedToFit = function ()
+	{
+		var fit = self.GetFittingZoomScaler();
+		return self.zoomsEqual(_zoomScaler, fit);
 	}
 })();
 ///////////////////////////////////////////////////////////////
@@ -16944,6 +18600,7 @@ function CameraNameLabels()
 	BI_CustomEvent.AddListener("ImageResized", onui3_cameraLabelsChanged);
 	BI_CustomEvent.AddListener("CameraListLoaded", onui3_cameraLabelsChanged);
 	BI_CustomEvent.AddListener("DynamicGroupLayoutLoaded", onui3_cameraLabelsChanged);
+	BI_CustomEvent.AddListener("FirstFrameLoaded", onui3_cameraLabelsChanged);
 
 	this.show = function (isHotkeyShow)
 	{
@@ -16967,8 +18624,8 @@ function CameraNameLabels()
 		if (show_names || show_overlay_icons)
 		{
 			var nativeRes = cameraListLoader.isDynamicLayoutEnabled(loaded.image.id)
-				? { w: loaded.image.actualwidth, h: loaded.image.actualheight }
-				: { w: loaded.image.fullwidth, h: loaded.image.fullheight };
+				? loaded.image.getActualRect()
+				: loaded.image.getFullRect();
 			var scaleX = imageRenderer.GetPreviousImageDrawInfo().w / nativeRes.w;
 			var scaleY = imageRenderer.GetPreviousImageDrawInfo().h / nativeRes.h;
 			var offsetCamHeight = settings.ui3_cameraLabels_position === CameraLabelPositionValues.Bottom || settings.ui3_cameraLabels_position === CameraLabelPositionValues.Below;
@@ -16978,6 +18635,7 @@ function CameraNameLabels()
 			var fontSizePt = parseFloat(settings.ui3_cameraLabels_fontSize);
 
 			var zoomAmount = (scaleX + scaleY) / 2; // scaleX and scaleY are probably the same or very close anyway.
+			zoomAmount = Clamp(zoomAmount, 0.5, 2); // Font sizing is a little screwy since 2022-03 or earlier. This keeps it from getting too big.
 			fontSizePt *= zoomAmount;
 			var minScaledFontSize = parseFloat(settings.ui3_cameraLabels_minimumFontSize);
 			if (fontSizePt < minScaledFontSize)
@@ -17127,6 +18785,14 @@ function AnyCameraTriggerOverlayIconsEnabled()
 		|| settings.ui3_camera_overlay_icon_audio_trigger === "1"
 		|| settings.ui3_camera_overlay_icon_generic_trigger === "1";
 }
+function AnyTimeSensitiveCameraStatusEffectsEnabled()
+{
+	var isH264 = videoPlayer.CurrentPlayerModuleName() === 'h264';
+	return AnyCameraTriggerOverlayIconsEnabled()
+		|| (!isH264 && settings.ui3_sound_motion && settings.ui3_sound_motion !== "None")
+		|| (!isH264 && settings.ui3_sound_trigger && settings.ui3_sound_trigger !== "None")
+		|| (settings.ui3_sound_alert && settings.ui3_sound_alert !== "None");
+}
 ///////////////////////////////////////////////////////////////
 // VideoCenter Icons and Video Loading/Buffering Overlay //////
 ///////////////////////////////////////////////////////////////
@@ -17228,7 +18894,7 @@ var videoOverlayHelper = new (function ()
 function CornerStatusIcons()
 {
 	var self = this;
-	var iconMap = new Object();
+	var iconMap = new FasterObjectMap();
 	// Icon names should be unique and alphanumeric ([0-9A-Za-z_]) because they are used to build the name of a setting.
 	self.iconList = new Array();
 	self.iconList.push({
@@ -17301,7 +18967,7 @@ function CornerStatusIcons()
 		/// <summary>This can be called at any time to recreate icons from iconList, e.g. if new icons were added to the array.</summary>
 		var $container = $("#cornerStatusIcons");
 		$container.empty();
-		iconMap = new Object();
+		iconMap = new FasterObjectMap();
 		for (var i = 0; i < self.iconList.length; i++)
 		{
 			var icon = self.iconList[i];
@@ -17362,7 +19028,7 @@ function LiveVideoPausing()
 
 	BI_CustomEvent.AddListener("Playback_Pause", function (loading)
 	{
-		if (loading.isLive && !playbackPausedToast.isShowing())
+		if (loading.isLive && !clipTimeline.timelineDidPauseVideo() && !playbackPausedToast.isShowing())
 			self.showToast("Live video is paused. Click here to resume.");
 	});
 	BI_CustomEvent.AddListener("Playback_Play", function (loading)
@@ -17525,7 +19191,7 @@ function BISoundEffect()
 					audio.pause();
 				return;
 			}
-			var path = currentServer.remoteBaseURL + "sounds/" + file;
+			var path = currentServer.remoteBaseURL + "sounds/" + file + "?v=" + combined_version + currentServer.GetLocalSessionArg("&");
 			if (!audio)
 			{
 				audio = new Audio(path);
@@ -17549,6 +19215,8 @@ function BISoundEffect()
 				{
 					try
 					{
+						if (ex.message.indexOf('call to pause') > -1)
+							return;
 						toaster.Error("Audio Play Error: " + htmlEncode(ex.name) + "<br>" + htmlEncode(ex.message), 15000);
 					}
 					catch (e)
@@ -17591,9 +19259,11 @@ function BISoundEffect()
 var biSoundPlayer = new (function ()
 {
 	var self = this;
-	var playerCache = new Object();
+	var playerCache = new FasterObjectMap();
 	this.PlayEvent = function (event)
 	{
+		if (developerMode)
+			console.log("PlayEvent " + event)
 		var player = playerCache[event];
 		if (!player)
 			player = playerCache[event] = new BISoundEffect();
@@ -17611,7 +19281,7 @@ var biSoundPlayer = new (function ()
 	}
 	this.TestUserInputRequirement = function ()
 	{
-		var eventSoundPlayerEnabled = settings.ui3_eventSoundVolume > 0 && (settings.ui3_sound_motion !== "None" || settings.ui3_sound_trigger !== "None");
+		var eventSoundPlayerEnabled = settings.ui3_eventSoundVolume > 0 && (settings.ui3_sound_motion !== "None" || settings.ui3_sound_trigger !== "None" || settings.ui3_sound_alert !== "None");
 		var videoStatusSoundsEnabled = settings.ui3_uiStatusSounds === "1" || settings.ui3_uiStatusSpeech === "1";
 		if (eventSoundPlayerEnabled || videoStatusSoundsEnabled)
 		{
@@ -17641,6 +19311,81 @@ var biSoundPlayer = new (function ()
 			}
 			catch (ex) { }
 		}
+	}
+	this.PlayEventSounds = function (response, previousResponse)
+	{
+		try
+		{
+			if (videoPlayer.Loading().image.isLive)
+			{
+				var currentCameras = GetCurrentlyVisibleCameras(response.data);
+				var previousCameras = GetCurrentlyVisibleCameras(previousResponse ? previousResponse.data : []);
+
+				if (videoPlayer.CurrentPlayerModuleName() !== 'h264')
+				{
+					if (AnyCameraIs(currentCameras, function (cam) { return cam.isMotion; })
+						&& !AnyCameraIs(previousCameras, function (cam) { return cam.isMotion; }))
+					{
+						self.PlayEvent("motion");
+					}
+
+					if (AnyCameraIs(currentCameras, function (cam) { return cam.isTriggered; })
+						&& !AnyCameraIs(previousCameras, function (cam) { return cam.isTriggered; }))
+					{
+						self.PlayEvent("trigger");
+					}
+				}
+				if (AnyCameraIs(currentCameras, function (cam) { return cam.isAlerting; })
+					&& !AnyCameraIs(previousCameras, function (cam) { return cam.isAlerting; }))
+				{
+					self.PlayEvent("alert");
+				}
+			}
+		}
+		catch (ex)
+		{
+			toaster.Error(ex);
+		}
+	}
+	var AnyCameraIs = function (cameras, condition)
+	{
+		if (cameras)
+			for (var i = 0; i < cameras.length; i++)
+				if (condition(cameras[i]))
+					return true;
+		return false;
+	}
+	var GetCurrentlyVisibleCameras = function (cameraList)
+	{
+		var cams = [];
+		// Get the names of cameras that are currently visible
+		var camNames = cameraListLoader.GetGroupCams(videoPlayer.Loading().image.id);
+		if (camNames && camNames.length)
+		{
+			// Get the camera objects from passed-in cameraList.
+			var camMap = new FasterObjectMap();
+			for (var i = 0; i < cameraList.length; i++)
+				camMap[cameraList[i].optionValue] = cameraList[i];
+
+			for (var i = 0; i < camNames.length; i++)
+			{
+				var cam = camMap[camNames[i]];
+				if (cam)
+					cams.push(cam);
+			}
+		}
+		else
+		{
+			for (var i = 0; i < cameraList.length; i++)
+			{
+				if (cameraList[i].optionValue === videoPlayer.Loading().image.id)
+				{
+					cams.push(cameraList[i]);
+					break;
+				}
+			}
+		}
+		return cams;
 	}
 })();
 ///////////////////////////////////////////////////////////////
@@ -17741,36 +19486,34 @@ function ClipOverlayCfg()
 	}
 	var Set = function (camId, type, val)
 	{
-		var camData = cameraListLoader.GetCameraWithId(camId);
-		if (camData)
+		var isTimelinePseudo = camId === "*ui3_timeline_pseudocam";
+		var camData = isTimelinePseudo ? null : cameraListLoader.GetCameraWithId(camId);
+		if (isTimelinePseudo || (camData && !cameraListLoader.CameraIsGroupOrCycle(camData)))
 		{
-			if (!cameraListLoader.CameraIsGroupOrCycle(camData))
+			if ((type === "t" || type === "m")
+				&& typeof val === "number")
 			{
-				if ((type === "t" || type === "m")
-					&& typeof val === "number")
+				var camCfg = cfg[camId];
+				if (!camCfg)
+					cfg[camId] = camCfg = {};
+				camCfg[type] = val;
+
+				if (val === 0)
+					delete camCfg[type];
+
+				var hasAnyProps = false;
+				for (var id in camCfg)
 				{
-					var camCfg = cfg[camId];
-					if (!camCfg)
-						cfg[camId] = camCfg = {};
-					camCfg[type] = val;
-
-					if (val === 0)
-						delete camCfg[type];
-
-					var hasAnyProps = false;
-					for (var id in camCfg)
+					if (Object.prototype.hasOwnProperty.call(camCfg, id))
 					{
-						if (camCfg.hasOwnProperty(id))
-						{
-							hasAnyProps = true;
-							break;
-						}
+						hasAnyProps = true;
+						break;
 					}
-					if (!hasAnyProps)
-						delete cfg[camId];
-
-					settings.ui3_clipOverlayCfg = JSON.stringify(cfg);
 				}
+				if (!hasAnyProps)
+					delete cfg[camId];
+
+				settings.ui3_clipOverlayCfg = JSON.stringify(cfg);
 			}
 		}
 	}
@@ -17838,8 +19581,9 @@ function GroupCfg()
 	{
 		toaster.Error(ex);
 	}
-	this.Get = function (camId, key)
+	this.Get = function (image, key)
 	{
+		var camId = getImageId(image);
 		if (camId)
 		{
 			var camCfg = cfg[camId];
@@ -17853,57 +19597,59 @@ function GroupCfg()
 		}
 		return 0;
 	}
-	this.Set = function (camId, key, val)
+	this.Set = function (image, key, val)
 	{
-		var camData = cameraListLoader.GetCameraWithId(camId);
-		if (camData)
+		var camId = getImageId(image);
+		if (camId)
 		{
-			if (cameraListLoader.CameraIsGroupOrCycle(camData))
+			if (keyMap[key])
+				key = keyMap[key];
+			var camCfg = cfg[camId];
+			if (!camCfg)
+				cfg[camId] = camCfg = {};
+			camCfg[key] = val;
+
+			if (typeof val === "undefined" || val === null || val === 0)
+				delete camCfg[key];
+
+			var hasAnyProps = false;
+			for (var id in camCfg)
 			{
-				if (keyMap[key])
-					key = keyMap[key];
-				var camCfg = cfg[camId];
-				if (!camCfg)
-					cfg[camId] = camCfg = {};
-				camCfg[key] = val;
-
-				if (typeof val === "undefined" || val === null || val === 0)
-					delete camCfg[key];
-
-				var hasAnyProps = false;
-				for (var id in camCfg)
+				if (Object.prototype.hasOwnProperty.call(camCfg, id))
 				{
-					if (camCfg.hasOwnProperty(id))
-					{
-						hasAnyProps = true;
-						break;
-					}
+					hasAnyProps = true;
+					break;
 				}
-				if (!hasAnyProps)
-					delete cfg[camId];
-
-				settings.ui3_groupCfg = JSON.stringify(cfg);
 			}
+			if (!hasAnyProps)
+				delete cfg[camId];
+
+			settings.ui3_groupCfg = JSON.stringify(cfg);
 		}
 	}
-	this.GetUrlArgs = function (camId)
+	this.GetUrlArgs = function (image)
 	{
 		var flagMask = { flags: 0, mask: 0 };
 
-		SetFlagMask(camId, flagMask, 0, "showCameraNames");
-		SetFlagMask(camId, flagMask, 1, "showCameraBorders");
-		SetFlagMask(camId, flagMask, 2, "showHiddenCameras");
-		SetFlagMask(camId, flagMask, 3, "hideDisabledCameras");
-		SetFlagMask(camId, flagMask, 4, "hideInactiveCamerasWithoutVideo");
+		SetFlagMask(image, flagMask, 0, "showCameraNames");
+		SetFlagMask(image, flagMask, 1, "showCameraBorders");
+		SetFlagMask(image, flagMask, 2, "showHiddenCameras");
+		SetFlagMask(image, flagMask, 3, "hideDisabledCameras");
+		SetFlagMask(image, flagMask, 4, "hideInactiveCamerasWithoutVideo");
 
 		var urlArgs = "";
 		if (flagMask.mask > 0)
 			urlArgs = "&flags=" + flagMask.flags + "&mask=" + flagMask.mask;
+		//if (!image.isGroup && settings.ui3_defaultCameraGroupId)
+		//{
+		//	// Add a "&group=" parameter so that BI knows which group you were streaming from.  This can affect camera scaling via the "Scale to fill" layout option.
+		//	urlArgs += "&group=" + encodeURIComponent(settings.ui3_defaultCameraGroupId);
+		//}
 		return urlArgs;
 	}
-	var SetFlagMask = function (camId, flagMask, index, key)
+	var SetFlagMask = function (image, flagMask, index, key)
 	{
-		var value = self.Get(camId, key);
+		var value = self.Get(image, key);
 		if (value === 1 || value === 2)
 		{
 			flagMask.mask |= (1 << index);
@@ -17913,8 +19659,8 @@ function GroupCfg()
 	}
 	this.GetResolutionThatWouldBeLockedIn = function (image)
 	{
-		var w = image.intendedW;
-		var h = image.intendedH;
+		var w = image.dynamicNativeW;
+		var h = image.dynamicNativeH;
 		if (w < image.actualwidth || h < image.actualheight)
 		{
 			w = image.actualwidth;
@@ -17924,26 +19670,42 @@ function GroupCfg()
 	}
 	this.LockResolution = function (image)
 	{
-		self.Set(image.id, "lockedResolution", self.GetResolutionThatWouldBeLockedIn(image));
+		self.Set(image, "lockedResolution", self.GetResolutionThatWouldBeLockedIn(image));
 	}
 	this.UnlockResolution = function (image)
 	{
-		self.Set(image.id, "lockedResolution", null);
+		self.Set(image, "lockedResolution", null);
 	}
-	this.GetLockedResolution = function (camId)
+	/**
+	 * Returns the locked resolution for the camera if one is saved for it, otherwise null.
+	 * @param {String} camId Camera Short Name
+	 */
+	this.GetLockedResolution = function (image)
 	{
-		var lockedResolution = self.Get(camId, "lockedResolution");
+		var lockedResolution = self.Get(image, "lockedResolution");
 		if (lockedResolution)
 		{
 			var parts = lockedResolution.split('x');
-			return { w: parseInt(parts[0]), h: parseInt(parts[1]) };
+			return new ui3Rect(parseInt(parts[0]), parseInt(parts[1]));
 		}
 		return null;
 	}
-	this.SetLockedResolution = function (camId, width, height)
+	this.SetLockedResolution = function (image, width, height)
 	{
-		self.Set(camId, "lockedResolution", width + "x" + height);
+		self.Set(image, "lockedResolution", width + "x" + height);
 		return null;
+	}
+	var getImageId = function (image)
+	{
+		if (!image)
+			return "";
+		var camData = cameraListLoader.GetCameraWithId(image.id);
+		if (camData && cameraListLoader.CameraIsGroupOrCycle(camData))
+			return image.id;
+		else if (image.isTimeline())
+			return "*ui3_timeline_pseudocam";
+		else
+			return "";
 	}
 }
 ///////////////////////////////////////////////////////////////
@@ -18290,10 +20052,13 @@ function StreamingProfile()
 	{
 		for (var prop in self)
 		{
-			var value = self[prop];
-			var type = typeof value;
-			if ((type === 'string' || type === 'number' || type === 'boolean') && value !== other[prop])
-				return false;
+			if (Object.prototype.hasOwnProperty.call(self, prop))
+			{
+				var value = self[prop];
+				var type = typeof value;
+				if ((type === 'string' || type === 'number' || type === 'boolean') && value !== other[prop])
+					return false;
+			}
 		}
 		return true;
 	}
@@ -18302,124 +20067,31 @@ function StreamingProfile()
 		var newProfile = new StreamingProfile();
 		for (var prop in self)
 		{
-			var value = self[prop];
-			var type = typeof value;
-			if (type === 'string' || type === 'number' || type === 'boolean')
-				newProfile[prop] = value;
+			if (Object.prototype.hasOwnProperty.call(self, prop))
+			{
+				var value = self[prop];
+				var type = typeof value;
+				if (type === 'string' || type === 'number' || type === 'boolean')
+					newProfile[prop] = value;
+			}
 		}
 		return newProfile;
 	}
 
 	this.GetUrlArgs = function (loading)
 	{
-		var w = loading.fullwidth;
-		var h = loading.fullheight;
 		var sb = new StringBuilder();
-
 		sb.Append("&stream=").Append(self.stream);
 
 		if (self.q >= 0)
 			sb.Append("&q=").Append(self.q);
 
-		// Jpeg size arguments are handled elsewhere.
+		var sizeToRequest = imageRenderer.GetSizeToRequest(loading, self);
+		sb.Append("&w=").Append(sizeToRequest.w);
+		sb.Append("&h=").Append(sizeToRequest.h);
+
 		if (self.vcodec === "h264")
 		{
-			// local variables w and h are the native resolution of the stream, and will help us determine what to request here.
-
-			// Dynamically-sized groups ignore the stated native resolution.
-			var resizableSource = cameraListLoader.isDynamicLayoutEnabled(loading.id);
-			if (resizableSource)
-			{
-				var dpiScalingFactor = BI_GetDevicePixelRatio();
-				var ssFactor = parseFloat(settings.ui3_jpegSupersampling);
-				if (isNaN(ssFactor) || ssFactor < 0.01 || ssFactor > 2)
-					ssFactor = 1;
-				var zoomFactor = imageRenderer.zoomHandler.GetZoomFactor();
-				var $layoutbody = $("#layoutbody");
-				var bodyW = $layoutbody.width();
-				var bodyH = $layoutbody.height();
-				var lockedResolution = groupCfg.GetLockedResolution(loading.id);
-				if (lockedResolution)
-				{
-					bodyW = lockedResolution.w;
-					bodyH = lockedResolution.h;
-				}
-				resizableSource = resizableSource
-					&& (bodyW * dpiScalingFactor * ssFactor) >= imageRenderer.minGroupImageDimension
-					&& (bodyH * dpiScalingFactor * ssFactor) >= imageRenderer.minGroupImageDimension;
-				if (resizableSource)
-				{
-					w = bodyW * dpiScalingFactor * ssFactor;
-					h = bodyH * dpiScalingFactor * ssFactor;
-				}
-			}
-
-			// This method should still work if w and h were omitted.
-			var aspect;
-			if (!w || !h)
-			{
-				w = 1280;
-				h = 720;
-			}
-			aspect = w / h;
-			var sizeToRequest = { w: 0, h: 0 };
-			if (self.w > 0 && self.h > 0)
-			{
-				// If both width and height are provided in the profile, UI3 will allow the 90-degree rotated form of this. Otherwise the width or height arguments will be strict limits.
-				// This enables decent handling of rotated views and different aspect ratios.
-				var profileIsPortrait = self.w < self.h;
-				var nativeIsPortrait = w < h;
-				var maxW = self.w;
-				var maxH = self.h;
-				if (profileIsPortrait !== nativeIsPortrait)
-				{
-					// Aspect ratio of profile is different from aspect ratio of camera, so we should swap the limits.
-					maxW = self.h;
-					maxH = self.w;
-				}
-				var profileAspect = maxW / maxH;
-				if (profileAspect >= aspect)
-				{
-					sizeToRequest.w = ~~(maxH * aspect); // ~~ is like casting to int
-					sizeToRequest.h = maxH;
-				}
-				else
-				{
-					sizeToRequest.w = maxW;
-					sizeToRequest.h = ~~(maxW / aspect);
-				}
-			}
-			else if (self.h >= 1)
-			{
-				sizeToRequest.w = ~~(self.h * aspect);
-				sizeToRequest.h = self.h;
-			}
-			else if (self.w >= 1)
-			{
-				sizeToRequest.w = self.w;
-				sizeToRequest.h = ~~(self.w / aspect);
-			}
-
-			if (resizableSource)
-			{
-				// Do not request a dimension larger than 7680.  Resizable group streams will revert to a standard size.
-				var aspect = (sizeToRequest.w / sizeToRequest.h);
-				if (sizeToRequest.w > imageRenderer.maxGroupImageDimension)
-				{
-					sizeToRequest.w = imageRenderer.maxGroupImageDimension;
-					sizeToRequest.h = sizeToRequest.w / aspect;
-				}
-				if (sizeToRequest.h > imageRenderer.maxGroupImageDimension)
-				{
-					sizeToRequest.h = imageRenderer.maxGroupImageDimension;
-					sizeToRequest.w = sizeToRequest.h * aspect;
-				}
-				sb.Append("&w=").Append(parseInt(Math.round(sizeToRequest.w)));
-
-				SetIntendedSize(loading, sizeToRequest.w, sizeToRequest.h);
-			}
-			sb.Append("&h=").Append(parseInt(Math.round(sizeToRequest.h)));
-
 			var kbps = -1; // -1: inherit, 0: no limit, 10-8192: limit
 			if (self.limitBitrate === 1)
 				kbps = 0; // Sentinel value instructing Blue Iris to use no limit
@@ -18487,23 +20159,49 @@ function StreamingProfile()
 	{
 		return self.vcodec === "jpeg" || (any_h264_playback_supported && self.vcodec === "h264");
 	}
+	/** Returns a ui3Rect representing the size requirements of this streaming profile.  Null if neither width or height were specified.  If only one of these was specified, the bounding box will be square. */
+	this.GetRect = function ()
+	{
+		if (self.w > 0 && self.h > 0)
+			return new ui3Rect(self.w, self.h);
+		else if (self.w > 0)
+			return new ui3Rect(self.w, self.w);
+		else if (self.h > 0)
+			return new ui3Rect(self.h, self.h);
+		else
+			return null;
+	}
 }
-function SetIntendedSize(loading, w, h)
+function SetDynamicNativeSize(loading, w, h)
 {
-	loading.intendedW = w;
-	loading.intendedH = h;
+	loading.dynamicNativeW = w;
+	loading.dynamicNativeH = h;
 	var imgLoading = videoPlayer.Loading().image;
 	if (imgLoading.id === loading.id)
 	{
-		imgLoading.intendedW = w;
-		imgLoading.intendedH = h;
+		imgLoading.dynamicNativeW = w;
+		imgLoading.dynamicNativeH = h;
 	}
 	var imgLoaded = videoPlayer.Loaded().image;
 	if (imgLoaded.id === loading.id)
 	{
-		imgLoaded.intendedW = w;
-		imgLoaded.intendedH = h;
+		imgLoaded.dynamicNativeW = w;
+		imgLoaded.dynamicNativeH = h;
 	}
+}
+function JpegSnapshotArgs(loadingImg)
+{
+	var p = new StreamingProfile();
+	p.isHQSnapshot = true; // Indicates this is to create isolated snapshots. Special behavior should be exhibited.
+	p.name = "Jpeg Snapshot";
+	p.vcodec = "jpeg";
+	p.abbr = "SS";
+	p.aClr = "#000000";
+	p.w = 3840;
+	p.h = 3840;
+	p.q = Clamp(parseInt(settings.ui3_download_snapshot_server_quality), 0, 100);
+
+	return "&decode=1" + p.GetUrlArgs(loadingImg);
 }
 ///////////////////////////////////////////////////////////////
 // Generic Quality Helper /////////////////////////////////////
@@ -18512,6 +20210,8 @@ function GenericQualityHelper()
 {
 	var self = this;
 	self.profiles = new Array();
+
+	var $layoutbody = $("#layoutbody");
 
 	this.GetCurrentProfile = function ()
 	{
@@ -18529,7 +20229,6 @@ function GenericQualityHelper()
 	this.GetAnyCompatibleProfile = function (didRestoreDefaults)
 	{
 		// Try to find the best profile
-		// First, one with a max bit rate nearest 1000
 		var best = null;
 		if (any_h264_playback_supported)
 		{
@@ -18634,50 +20333,63 @@ function GenericQualityHelper()
 				return self.profiles[i];
 		return null;
 	}
-	this.getSeekPreviewQualityArgs = function (dimKey, dimValue)
+	this.getSeekPreviewQualityArgs = function (loadingImg)
 	{
-		var playerId = self.GetCurrentProfile().vcodec;
-		if (playerId == "h264")
+		var profile = self.GetCurrentProfile();
+		var sizeToRequest = imageRenderer.GetSizeToRequest(loadingImg, profile);
+		var playerId = profile.vcodec;
+		var quality = null;
+		if (playerId == "jpeg" && profile.q)
+			quality = profile.q;
+		if (currentPrimaryTab !== "timeline")
 		{
-			var bitRate_Video = bitRateCalc_Video.GetBestGuess() * 8;
-			var bitRate_Audio = bitRateCalc_Audio.GetBestGuess() * 8;
-			var bitRateMbps = (bitRate_Video + bitRate_Audio) / 1000000;
-			var sizeLimit;
-			var quality;
-			if (bitRateMbps < 0.5)
+			if (playerId == "h264")
 			{
-				sizeLimit = Math.min(dimValue, 320);
-				quality = 20;
+				var bitRateMbps;
+				if (profile.kbps)
+					bitRateMbps = profile.kbps / 1000;
+				else
+				{
+					var bitRate_Video = bitRateCalc_Video.GetBestGuess() * 8;
+					var bitRate_Audio = bitRateCalc_Audio.GetBestGuess() * 8;
+					bitRateMbps = (bitRate_Video / 1000000) + (bitRate_Audio / 1000000);
+				}
+
+				if (bitRateMbps < 0.1)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(320, 320));
+					quality = 20;
+				}
+				else if (bitRateMbps < 0.3)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(480, 480));
+					quality = 20;
+				}
+				else if (bitRateMbps < 0.5)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(640, 640));
+					quality = 25;
+				}
+				else if (bitRateMbps < 0.75)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(640, 640));
+					quality = 40;
+				}
+				else if (bitRateMbps < 1.5)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(1280, 1280));
+					quality = 50;
+				}
+				else if (bitRateMbps < 4)
+				{
+					sizeToRequest.ApplyBoundingBox(new ui3Rect(1920, 1920));
+					quality = 60;
+				}
+				else
+					quality = 75;
 			}
-			else if (bitRateMbps < 1)
-			{
-				sizeLimit = Math.min(dimValue, 480);
-				quality = 20;
-			}
-			else if (bitRateMbps < 1.67)
-			{
-				sizeLimit = Math.min(dimValue, 640);
-				quality = 25;
-			}
-			else if (bitRateMbps < 2.33)
-			{
-				sizeLimit = Math.min(dimValue, 640);
-				quality = 50;
-			}
-			else if (bitRateMbps < 3.5)
-			{
-				sizeLimit = Math.min(dimValue, 1280);
-				quality = 60;
-			}
-			else // Plenty of bandwidth. Get whatever resolution fits best.
-			{
-				sizeLimit = dimValue;
-				quality = 75;
-			}
-			return "&" + dimKey + "=" + sizeLimit + "&q=" + quality;
 		}
-		else
-			return "&" + dimKey + "=" + jpegQualityHelper.ModifyImageDimension(dimKey, dimValue) + jpegQualityHelper.getQualityArg();
+		return "&w=" + sizeToRequest.w + "&h=" + sizeToRequest.h + "&stream=" + profile.stream + (quality === null ? "" : ("&q=" + quality));
 	}
 
 	var Create_4K_VBR = function ()
@@ -18724,6 +20436,7 @@ function GenericQualityHelper()
 			p.aClr = "#008248";
 			p.w = 3840;
 			p.h = 2160;
+			p.q = 50;
 			p.limitBitrate = 2;
 			p.kbps = 8192;
 			profiles.push(p);
@@ -18735,6 +20448,7 @@ function GenericQualityHelper()
 			p.aClr = "#0048A2";
 			p.w = 2560;
 			p.h = 1440;
+			p.q = 40;
 			p.limitBitrate = 2;
 			p.kbps = 4096;
 			profiles.push(p);
@@ -18746,6 +20460,7 @@ function GenericQualityHelper()
 			p.aClr = "#004882";
 			p.w = 1920;
 			p.h = 1080;
+			p.q = 35;
 			p.limitBitrate = 2;
 			p.kbps = 2048;
 			profiles.push(p);
@@ -18757,6 +20472,7 @@ function GenericQualityHelper()
 			p.aClr = "#003862";
 			p.w = 1280;
 			p.h = 720;
+			p.q = 35;
 			p.limitBitrate = 2;
 			p.kbps = 1024;
 			profiles.push(p);
@@ -18768,6 +20484,7 @@ function GenericQualityHelper()
 			p.aClr = "#884400";
 			p.w = 856;
 			p.h = 480;
+			p.q = 30;
 			p.limitBitrate = 2;
 			p.kbps = 456;
 			profiles.push(p);
@@ -18779,6 +20496,7 @@ function GenericQualityHelper()
 			p.aClr = "#883000";
 			p.w = 640;
 			p.h = 360;
+			p.q = 30;
 			p.limitBitrate = 2;
 			p.kbps = 256;
 			profiles.push(p);
@@ -18790,6 +20508,7 @@ function GenericQualityHelper()
 			p.aClr = "#882000";
 			p.w = 427;
 			p.h = 240;
+			p.q = 30;
 			p.limitBitrate = 2;
 			p.kbps = 114;
 			profiles.push(p);
@@ -18801,6 +20520,7 @@ function GenericQualityHelper()
 			p.aClr = "#880000";
 			p.w = 256;
 			p.h = 144;
+			p.q = 30;
 			p.limitBitrate = 2;
 			p.kbps = 41;
 			profiles.push(p);
@@ -18863,7 +20583,8 @@ function GenericQualityHelper()
 				if (u)
 				{
 					for (var key in u)
-						profileData[i][key] = u[key];
+						if (Object.prototype.hasOwnProperty.call(u, key))
+							profileData[i][key] = u[key];
 					upgradeMade = true;
 				}
 			}
@@ -19025,8 +20746,19 @@ function GroupLayoutDialog()
 		$content = $('<div class="groupLayoutUiPanelContent"></div>');
 		$dlg.append($content);
 
+		var camName;
+		var camData = cameraListLoader.GetCameraWithId(img.id);
+		if (camData && cameraListLoader.CameraIsGroupOrCycle(camData))
+			camName = '"' + cameraListLoader.GetCameraName(img.id) + '" Group Settings';
+		else if (img.isTimeline())
+			camName = "Timeline Solo-Camera Settings";
+		else
+		{
+			toaster.Error("Application error. GroupLayoutDialog does not support individual camera settings.");
+			return;
+		}
 		dialog = $dlg.dialog({
-			title: '"' + cameraListLoader.GetCameraName(img.id) + '" Group Settings'
+			title: camName
 			, overlayOpacity: 0.3
 			, closeOnOverlayClick: true
 		});
@@ -19034,12 +20766,26 @@ function GroupLayoutDialog()
 		// Load elements into dialog
 		if (cameraListLoader.isDynamicLayoutEligible(img.id))
 		{
-			var lockedResolution = groupCfg.GetLockedResolution(img.id);
+			var lockedResolution = groupCfg.GetLockedResolution(img);
 			var collapsible = new CollapsibleSection('grpLayout', "Camera Layout", dialog);
 			$content.append(collapsible.$heading);
 			$content.append(collapsible.$section);
 			if (settings.ui3_dynamicGroupLayout === "0")
 				collapsible.$section.append('<div style="padding: 8px; margin-bottom: 10px; border: 2px dotted #FF0000;">This section has no effect while Dynamic Group Layout is disabled in UI Settings &gt; Video Player.</div>');
+			collapsible.$section.append(UIFormField({
+				inputType: "range"
+				, value: imageRenderer.getMaxGroupImageDimension()
+				, minValue: 240
+				, maxValue: 7680
+				, step: 8
+				, label: 'Dynamic Group Max Resolution<div class="settingDesc">(strongly affects server CPU usage)<br>(this setting affects all dynamic groups)</div>'
+				, tag: "maxDynRes",
+				onChange: function (e, tag, $input)
+				{
+					settings.ui3_maxDynamicGroupImageDimension = $input.val();
+					OnChange_ui3_maxDynamicGroupImageDimension();
+				}
+			}));
 			collapsible.$section.append(UIFormField({
 				inputType: "checkbox"
 				, value: !lockedResolution
@@ -19065,28 +20811,28 @@ function GroupLayoutDialog()
 			$layoutWidth = UIFormField({
 				inputType: "number"
 				, minValue: imageRenderer.minGroupImageDimension
-				, maxValue: Math.max(7680, imageRenderer.maxGroupImageDimension)
-				, step: 16
+				, maxValue: Math.max(7680, imageRenderer.getMaxGroupImageDimension())
+				, step: 8
 				, value: lockedResolution ? lockedResolution.w : 1920
 				, label: "Width"
 				, tag: "width",
 				onChange: function (e, tag, $input)
 				{
-					groupCfg.SetLockedResolution(img.id, $layoutWidth.find('input').val(), $layoutHeight.find('input').val());
+					groupCfg.SetLockedResolution(img, $layoutWidth.find('input').val(), $layoutHeight.find('input').val());
 					videoPlayer.ReopenStreamAtCurrentSeekPosition();
 				}
 			});
 			$layoutHeight = UIFormField({
 				inputType: "number"
 				, minValue: imageRenderer.minGroupImageDimension
-				, maxValue: Math.max(7680, imageRenderer.maxGroupImageDimension)
-				, step: 16
+				, maxValue: Math.max(7680, imageRenderer.getMaxGroupImageDimension())
+				, step: 8
 				, value: lockedResolution ? lockedResolution.h : 1080
 				, label: "Height"
 				, tag: "height",
 				onChange: function (e, tag, $input)
 				{
-					groupCfg.SetLockedResolution(img.id, $layoutWidth.find('input').val(), $layoutHeight.find('input').val());
+					groupCfg.SetLockedResolution(img, $layoutWidth.find('input').val(), $layoutHeight.find('input').val());
 					videoPlayer.ReopenStreamAtCurrentSeekPosition();
 				}
 			});
@@ -19102,16 +20848,16 @@ function GroupLayoutDialog()
 			$layoutHeight = $();
 		}
 
-		if (img.isGroup)
+		if (img.isGroup || img.isTimeline())
 		{
 			var collapsible = new CollapsibleSection('grpDisp', "Display Options", dialog);
 			$content.append(collapsible.$heading);
 			$content.append(collapsible.$section);
-			collapsible.$section.append(ThreeStateFormField(img.id, "showCameraNames", "Show camera names"));
-			collapsible.$section.append(ThreeStateFormField(img.id, "showCameraBorders", "Show camera borders"));
-			collapsible.$section.append(ThreeStateFormField(img.id, "showHiddenCameras", "Show hidden cameras"));
-			collapsible.$section.append(ThreeStateFormField(img.id, "hideDisabledCameras", "Hide disabled cameras"));
-			collapsible.$section.append(ThreeStateFormField(img.id, "hideInactiveCamerasWithoutVideo", "Hide inactive cameras without video"));
+			collapsible.$section.append(ThreeStateFormField(img, "showCameraNames", "Show camera names"));
+			collapsible.$section.append(ThreeStateFormField(img, "showCameraBorders", "Show camera borders"));
+			collapsible.$section.append(ThreeStateFormField(img, "showHiddenCameras", "Show hidden cameras"));
+			collapsible.$section.append(ThreeStateFormField(img, "hideDisabledCameras", "Hide disabled cameras"));
+			collapsible.$section.append(ThreeStateFormField(img, "hideInactiveCamerasWithoutVideo", "Hide inactive cameras without video"));
 		}
 
 		if ($content.children().length === 0)
@@ -19119,9 +20865,9 @@ function GroupLayoutDialog()
 
 		dialog.contentChanged(true);
 	}
-	var ThreeStateFormField = function (camId, key, label)
+	var ThreeStateFormField = function (img, key, label)
 	{
-		var v = groupCfg.Get(camId, key);
+		var v = groupCfg.Get(img, key);
 		if (!v || v < 0 || v > 2)
 			v = 0;
 
@@ -19132,14 +20878,14 @@ function GroupLayoutDialog()
 			, tag: key,
 			onChange: function (e, value, $btn)
 			{
-				groupCfg.Set(camId, key, value);
+				groupCfg.Set(img, key, value);
 				videoPlayer.ReopenStreamAtCurrentSeekPosition();
 			}
 		})
 	}
 	var ResetResolutionInputVisibility = function ()
 	{
-		var lockedResolution = groupCfg.GetLockedResolution(img.id);
+		var lockedResolution = groupCfg.GetLockedResolution(img);
 		if (lockedResolution)
 		{
 			$layoutWidth.find('input').val(lockedResolution.w);
@@ -19165,44 +20911,14 @@ function GroupLayoutDialog()
 	}
 }
 ///////////////////////////////////////////////////////////////
-// Jpeg Quality Helper ////////////////////////////////////////
-///////////////////////////////////////////////////////////////
-function JpegQualityHelper()
-{
-	var self = this;
-	this.getQualityArg = function ()
-	{
-		var p = genericQualityHelper.GetCurrentProfile();
-		if (p.q)
-			return "&q=" + p.q;
-		else
-			return "";
-	}
-	this.ModifyImageDimension = function (dimKey, dimValue)
-	{
-		var p = genericQualityHelper.GetCurrentProfile();
-		if (dimKey === "w")
-		{
-			if (p.w > 0)
-				return Math.min(dimValue, p.w);
-			return dimValue;
-		}
-		else
-		{
-			if (p.h > 0)
-				return Math.min(dimValue, p.h);
-			return dimValue;
-		}
-	}
-}
-///////////////////////////////////////////////////////////////
 // Video Canvas Context Menu //////////////////////////////////
 ///////////////////////////////////////////////////////////////
 function CanvasContextMenu()
 {
+	var self = this;
 	var lastLiveContextMenuSelectedCamera = null;
 	var lastRecordContextMenuSelectedClip = null;
-	var self = this;
+	var lastTimelineContextMenuSelectedCamera = null;
 
 	var onShowLiveContextMenu = function (menu)
 	{
@@ -19247,10 +20963,10 @@ function CanvasContextMenu()
 
 		var downloadButton = $("#cmroot_liveview_downloadbutton_findme").closest(".b-m-item");
 		if (downloadButton.parent().attr("id") == "cmroot_liveview_downloadlink")
-			downloadButton.parent().attr("href", videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85" /* LOC0 */);
+			downloadButton.parent().attr("href", videoPlayer.GetLastSnapshotUrl());
 		else
 			downloadButton.wrap('<a id="cmroot_liveview_downloadlink" style="display:block" href="'
-				+ videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85" /* LOC0 */
+				+ videoPlayer.GetLastSnapshotUrl()
 				+ '" onclick="saveSnapshot(&quot;#cmroot_liveview_downloadlink&quot;)" target="_blank"></a>');
 		$("#cmroot_liveview_downloadlink").attr("download", "temp.jpg");
 
@@ -19275,26 +20991,6 @@ function CanvasContextMenu()
 	}
 	var onLiveContextMenuAction = function ()
 	{
-		if (this.data.alias.endsWith("_nopreference")
-			|| this.data.alias.endsWith("_off")
-			|| this.data.alias.endsWith("_on"))
-		{
-			var imgLoaded = videoPlayer.Loaded().image;
-			if (imgLoaded.isGroup)
-			{
-				var parts = this.data.alias.split('_');
-				var key = parts[0];
-				var value = 0;
-				if (parts[1] === "off")
-					value = 1;
-				if (parts[1] === "on")
-					value = 2;
-				console.log("Setting " + imgLoaded.id + "." + key + " = " + parts[1]);
-				groupCfg.Set(imgLoaded.id, key, value);
-				videoPlayer.ReopenStreamAtCurrentSeekPosition();
-			}
-			return;
-		}
 		switch (this.data.alias)
 		{
 			case "maximize":
@@ -19334,10 +21030,10 @@ function CanvasContextMenu()
 					new CameraProperties(lastLiveContextMenuSelectedCamera.optionValue);
 				break;
 			case "opennewtab":
-				window.open(videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85"); /* LOC0 */
+				window.open(videoPlayer.GetLastSnapshotUrl());
 				break;
 			case "copyimageaddress":
-				var relUrl = videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85"; /* LOC0 */
+				var relUrl = videoPlayer.GetLastSnapshotUrl();
 				if (!relUrl.startsWith("/"))
 					relUrl = "/" + relUrl;
 				clipboardHelper.CopyText(location.origin + relUrl);
@@ -19397,7 +21093,7 @@ function CanvasContextMenu()
 	}
 	var onTriggerRecordContextMenu = function (e)
 	{
-		if (videoPlayer.Loading().image.isLive)
+		if (videoPlayer.Loading().image.isLive || videoPlayer.Loading().image.isTimeline())
 			return false;
 
 		videoPlayer.suppressMouseHelper();
@@ -19409,10 +21105,10 @@ function CanvasContextMenu()
 
 		var downloadButton = $("#cmroot_recordview_downloadbutton_findme").closest(".b-m-item");
 		if (downloadButton.parent().attr("id") == "cmroot_recordview_downloadlink")
-			downloadButton.parent().attr("href", videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85" /* LOC0 */);
+			downloadButton.parent().attr("href", videoPlayer.GetLastSnapshotUrl());
 		else
 			downloadButton.wrap('<a id="cmroot_recordview_downloadlink" style="display:block" href="'
-				+ videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85" /* LOC0 */
+				+ videoPlayer.GetLastSnapshotUrl()
 				+ '" onclick="saveSnapshot(&quot;#cmroot_recordview_downloadlink&quot;)" target="_blank"></a>');
 		$("#cmroot_recordview_downloadlink").attr("download", "temp.jpg");
 
@@ -19444,7 +21140,7 @@ function CanvasContextMenu()
 				break;
 			case "opennewtab":
 				videoPlayer.Playback_Pause();
-				window.open(videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85"); /* LOC0 */
+				window.open(videoPlayer.GetLastSnapshotUrl());
 				break;
 			case "saveas":
 				return true;
@@ -19467,7 +21163,7 @@ function CanvasContextMenu()
 				nerdStats.Open();
 				return;
 			case "copyimageaddress":
-				var relUrl = videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=85"; /* LOC0 */
+				var relUrl = videoPlayer.GetLastSnapshotUrl();
 				if (!relUrl.startsWith("/"))
 					relUrl = "/" + relUrl;
 				clipboardHelper.CopyText(location.origin + relUrl);
@@ -19524,7 +21220,7 @@ function CanvasContextMenu()
 	{
 		alias: "cmroot_record", width: 200, items:
 			[
-				{ text: "Open image in new tab", icon: "", alias: "opennewtab", action: onRecordContextMenuAction }
+				{ text: "Open image in new tab", icon: "#svg_mio_Tab", iconClass: "noflip", alias: "opennewtab", action: onRecordContextMenuAction }
 				, { text: '<div id="cmroot_recordview_downloadbutton_findme" style="display:none"></div>Save image to disk', icon: "#svg_x5F_Snapshot", alias: "saveas", action: onRecordContextMenuAction }
 				, { text: '<span id="cmroot_recordview_downloadclipbutton">Download clip</span>', icon: "#svg_x5F_Download", alias: "downloadclip", action: onRecordContextMenuAction }
 				, { text: 'Convert/export', icon: "#svg_mio_launch", iconClass: "noflip", alias: "convertexport", action: onRecordContextMenuAction }
@@ -19546,6 +21242,175 @@ function CanvasContextMenu()
 		, clickType: GetPreferredContextMenuTrigger()
 	};
 	$("#layoutbody").contextmenu(optionRecord);
+
+	var onShowTimelineContextMenu = function (menu)
+	{
+		// 2022-03-11 - I'm letting the user configure group settings, such as display of labels, for solo-camera timeline views. It is hacky but it works.
+		var imgLoaded = videoPlayer.Loaded().image;
+		if (cameraListLoader.GetGroupCamera(imgLoaded.id))
+			$("#submenu_trigger_timelineGroupSettings").text('Group Settings');
+		else
+			$("#submenu_trigger_timelineGroupSettings").text('Solo-Camera Settings');
+
+		var itemsToDisable = ["cameraname"];
+		if (lastTimelineContextMenuSelectedCamera == null || !cameraListLoader.CameraIsAlone(lastTimelineContextMenuSelectedCamera))
+		{
+			itemsToDisable = itemsToDisable.concat(["maximize", "properties"]);
+			menu.applyrule(
+				{
+					name: "disable_camera_buttons",
+					disable: true,
+					items: itemsToDisable
+				});
+		}
+		else
+		{
+			if (lastTimelineContextMenuSelectedCamera.isFakeGroup)
+				itemsToDisable.push("maximize");
+			menu.applyrule(
+				{
+					name: "disable_cameraname",
+					disable: true,
+					items: itemsToDisable
+				});
+		}
+	}
+	var onTriggerTimelineContextMenu = function (e)
+	{
+		if (!videoPlayer.Loading().image.isTimeline() || !videoPlayer.Loaded().image.isTimeline())
+			return false;
+
+		mouseCoordFixer.fix(e);
+
+		videoPlayer.suppressMouseHelper();
+		videoOverlayHelper.HideFalseLoadingOverlay();
+
+		var downloadButton = $("#cmroot_timelineview_downloadbutton_findme").closest(".b-m-item");
+		if (downloadButton.parent().attr("id") == "cmroot_timelineview_downloadlink")
+			downloadButton.parent().attr("href", videoPlayer.GetLastSnapshotUrl());
+		else
+			downloadButton.wrap('<a id="cmroot_timelineview_downloadlink" style="display:block" href="'
+				+ videoPlayer.GetLastSnapshotUrl()
+				+ '" onclick="saveSnapshot(&quot;#cmroot_timelineview_downloadlink&quot;)" target="_blank"></a>');
+		$("#cmroot_timelineview_downloadlink").attr("download", "temp.jpg");
+
+		var homeGroupObj = null;
+		var camData = videoPlayer.GetCameraUnderMousePointer(e);
+		if (camData == null)
+			camData = homeGroupObj = videoPlayer.GetCurrentHomeGroupObj();
+		lastTimelineContextMenuSelectedCamera = camData;
+		if (camData != null)
+		{
+			LoadDynamicManualRecordingButtonState(camData);
+			var camName = CleanUpGroupName(camData.optionDisplay);
+			$("#contextMenuTimelineCameraName").text(camName);
+			$("#contextMenuTimelineCameraName").closest("div.b-m-item,div.b-m-idisable").attr("title", "The buttons below are specific to the camera: " + camName);
+			var $maximize = $("#contextMenuTimelineMaximize");
+			var isMaxAlready = (camData.optionValue == videoPlayer.Loaded().image.id && homeGroupObj == null);
+			$maximize.text(isMaxAlready ? "Back to Group" : "Maximize");
+			$maximize.parent().prev().find("use").attr("xlink:href", isMaxAlready ? "#svg_mio_FullscreenExit" : "#svg_mio_Fullscreen");
+		}
+
+		ThreeStateMenuItem.Refresh("timeline_motionoverlays", clipOverlayCfg.GetMotionOverlay("*ui3_timeline_pseudocam"));
+		ThreeStateMenuItem.Refresh("timeline_textoverlays", clipOverlayCfg.GetTextOverlay("*ui3_timeline_pseudocam"));
+
+		return true;
+	}
+	var onTimelineContextMenuAction = function ()
+	{
+		switch (this.data.alias)
+		{
+			case "maximize":
+				if (!cameraListLoader.CameraIsAlone(lastTimelineContextMenuSelectedCamera))
+					toaster.Warning("Function is unavailable.");
+				else
+					videoPlayer.ImgClick_Camera(lastTimelineContextMenuSelectedCamera);
+				break;
+			case "properties":
+				if (!cameraListLoader.CameraIsAlone(lastTimelineContextMenuSelectedCamera))
+					toaster.Warning("You cannot view properties of cameras that are part of an auto-cycle.");
+				else
+					new CameraProperties(lastTimelineContextMenuSelectedCamera.optionValue);
+				break;
+			case "opennewtab":
+				window.open(videoPlayer.GetLastSnapshotUrl());
+				break;
+			case "copyimageaddress":
+				var relUrl = videoPlayer.GetLastSnapshotUrl();
+				if (!relUrl.startsWith("/"))
+					relUrl = "/" + relUrl;
+				clipboardHelper.CopyText(location.origin + relUrl);
+				break;
+			case "saveas":
+				return true;
+			case "statsfornerds":
+				nerdStats.Open();
+				break;
+			case "group_settings_edit":
+				groupLayoutDialog.Show(videoPlayer.Loaded().image);
+				break;
+			case "golive":
+				videoPlayer.goLive();
+				break;
+			case "timeline_motionoverlays_nopreference":
+				clipOverlayCfg.SetMotionOverlay("*ui3_timeline_pseudocam", 0);
+				videoPlayer.RefreshVideoStream();
+				break;
+			case "timeline_motionoverlays_off":
+				clipOverlayCfg.SetMotionOverlay("*ui3_timeline_pseudocam", 1);
+				videoPlayer.RefreshVideoStream();
+				break;
+			case "timeline_motionoverlays_on":
+				clipOverlayCfg.SetMotionOverlay("*ui3_timeline_pseudocam", 2);
+				videoPlayer.RefreshVideoStream();
+				break;
+			case "timeline_textoverlays_nopreference":
+				clipOverlayCfg.SetTextOverlay("*ui3_timeline_pseudocam", 0);
+				videoPlayer.RefreshVideoStream();
+				break;
+			case "timeline_textoverlays_off":
+				clipOverlayCfg.SetTextOverlay("*ui3_timeline_pseudocam", 1);
+				videoPlayer.RefreshVideoStream();
+				break;
+			case "timeline_textoverlays_on":
+				clipOverlayCfg.SetTextOverlay("*ui3_timeline_pseudocam", 2);
+				videoPlayer.RefreshVideoStream();
+				break;
+			default:
+				toaster.Error(this.data.alias + " is not implemented!");
+				break;
+		}
+	}
+	var onCancelTimelineContextMenu = function ()
+	{
+	}
+	var optionTimeline =
+	{
+		alias: "cmroot_timelinecanvas", width: 200, items:
+			[
+				{ text: "Open image in new tab", icon: "#svg_mio_Tab", iconClass: "noflip", alias: "opennewtab", action: onTimelineContextMenuAction }
+				, { text: '<div id="cmroot_timelineview_downloadbutton_findme" style="display:none"></div>Save image to disk', icon: "#svg_x5F_Snapshot", alias: "saveas", action: onTimelineContextMenuAction }
+				, { text: "Copy image address", icon: "#svg_mio_copy", iconClass: "noflip", alias: "copyimageaddress", action: onTimelineContextMenuAction }
+				, { text: "Go Live", icon: "#svg_mio_clock", iconClass: "noflip clockRotate", alias: "golive", action: onTimelineContextMenuAction }
+				, { type: "splitLine" }
+				, { text: "<span id=\"submenu_trigger_timelineGroupSettings\">Group Settings</span>", icon: "#svg_mio_apps", iconClass: "noflip", alias: "group_settings_edit", action: onTimelineContextMenuAction }
+				, ThreeStateMenuItem.Create("timeline_motionoverlays", "Motion overlays", onTimelineContextMenuAction)
+				, ThreeStateMenuItem.Create("timeline_textoverlays", "Text/graphic overlays", onTimelineContextMenuAction)
+				, { type: "splitLine" }
+				, { text: "<span id=\"contextMenuTimelineCameraName\">Camera Name</span>", icon: "", alias: "cameraname" }
+				, { type: "splitLine" }
+				, { text: "<span id=\"contextMenuTimelineMaximize\">Maximize</span>", icon: "#svg_mio_Fullscreen", iconClass: "noflip", alias: "maximize", action: onTimelineContextMenuAction }
+				, { type: "splitLine" }
+				, { text: "Stats for nerds", icon: "#svg_x5F_Info", alias: "statsfornerds", action: onTimelineContextMenuAction }
+				, { type: "splitLine" }
+				, { text: "Properties", icon: "#svg_x5F_Viewdetails", alias: "properties", action: onTimelineContextMenuAction }
+			]
+		, onContextMenu: onTriggerTimelineContextMenu
+		, onCancelContextMenu: onCancelTimelineContextMenu
+		, onShow: onShowTimelineContextMenu
+		, clickType: GetPreferredContextMenuTrigger()
+	};
+	$("#layoutbody").contextmenu(optionTimeline);
 }
 var ThreeStateMenuItem = new (function ()
 {
@@ -19732,11 +21597,11 @@ function ClipListContextMenu()
 			var clipData = clipLoader.GetClipFromId(allSelectedClipIDs[i]);
 			if (clipData)
 			{
-				if ((clipData.flags & clip_flag_flag) == 0)
+				if ((clipData.flags & BIDBFLAG_FLAGGED) == 0)
 					flagEnable = true;
-				if ((clipData.flags & clip_flag_protect) == 0)
+				if ((clipData.flags & BIDBFLAG_PROTECTED) == 0)
 					protectEnable = true;
-				if ((clipData.flags & alert_flag_sentry_trigger) == 0)
+				if ((clipData.flags & BIDBFLAG_AI_CONFIRMED_X) == 0)
 					aiConfirm = true;
 			}
 		}
@@ -19893,7 +21758,7 @@ function ClipListContextMenu()
 			[
 				{ text: '<span id="cm_cliplist_flag">Flag</span>', icon: "#svg_x5F_Flag", iconClass: "", alias: "flag", action: onContextMenuAction }
 				, { text: '<span id="cm_cliplist_protect">Protect</span>', icon: "#svg_mio_lock", iconClass: "noflip", alias: "protect", action: onContextMenuAction }
-				, { text: '<span id="cm_cliplist_aiconfirm">(un)Mark as AI-confirmed</span>', icon: "#sentry_logo", iconClass: "noflip", alias: "aiconfirm", action: onContextMenuAction }
+				, { text: '<span id="cm_cliplist_aiconfirm">(un)Mark as AI-confirmed</span>', icon: "#svg_mio_cbChecked", iconClass: "noflip", alias: "aiconfirm", action: onContextMenuAction }
 				, { text: '<span id="cm_cliplist_download">Download</span>', icon: "#svg_x5F_Download", alias: "download", action: onContextMenuAction }
 				, (addDeleteItem
 					? { text: '<span id="cm_cliplist_delete">Delete</span>', icon: "#svg_mio_Trash", iconClass: "noflip", alias: "delete", action: onContextMenuAction }
@@ -20227,6 +22092,19 @@ function CameraConfig()
 				return;
 			}
 		}
+		else if (key.startsWith("setpost."))
+		{
+			args.setpost = {};
+			if (key == "setpost.timed")
+				args.setpost.timed = value;
+			else if (key == "setpost.timed_interval")
+				args.setpost.timed_interval = value;
+			else
+			{
+				toaster.Error('Unknown camera configuration key: ' + htmlEncode(key), 3000);
+				return;
+			}
+		}
 		else
 		{
 			toaster.Error('Unknown camera configuration key: ' + htmlEncode(key), 3000);
@@ -20520,7 +22398,7 @@ function CameraProperties(camId)
 						$generalSection.append(GetCamPropCheckbox("webcast|" + camId, "Webcasting Enabled", cam.webcast, camPropAdminCommandOnOffBtnClick));
 						$generalSection.append(GetCamPropCheckbox("hide|" + camId, "Hidden", cam.hidden, camPropAdminCommandOnOffBtnClick));
 						$generalSection.append(GetCamPropCheckbox("schedule|" + camId, "Override Global Schedule", response.data.schedule, camPropOnOffBtnClick));
-						$generalSection.append(GetCamPropCheckbox("ptzcycle|" + camId, "PTZ preset cycle", response.data.ptzcycle, camPropOnOffBtnClick));
+						$generalSection.append(GetCamPropCheckbox("ptzcycle|" + camId, "PTZ auto-cycle", response.data.ptzcycle, camPropOnOffBtnClick));
 						$generalSection.append(GetCamPropCheckbox("ptzevents|" + camId, "PTZ event schedule", response.data.ptzevents, camPropOnOffBtnClick));
 						$generalSection.append(GetCamPropCheckbox("output|" + camId, "DIO output 1", response.data.output, camPropOnOffBtnClick));
 						$generalSection.append(GetCamPropCheckbox("push|" + camId, "Mobile App Push", response.data.push, camPropOnOffBtnClick));
@@ -20573,6 +22451,14 @@ function CameraProperties(camId)
 							+ GetHtmlOptionElementMarkup("3", "Motion + Objects", response.data.setmotion.showmotion.toString()));
 						$motionSection.append($selectHighlight);
 						$camprop.append($motionSection);
+
+						var collapsible = new CollapsibleSection('jp', "Jpeg Posting", modal_cameraPropDialog);
+						$camprop.append(collapsible.$heading);
+						var $postSection = collapsible.$section;
+						$postSection.append('<div class="dialogOption_item dialogOption_item_info">Due to limited Blue Iris API functionality, this section offers very limited configuration from Blue Iris\'s <b>Camera Properties &gt; Post</b> tab.</div>');
+						$postSection.append(GetCamPropCheckbox("setpost.timed|" + camId, "Queue an image update ...", response.data.setpost.timed, camPropOnOffBtnClick));
+						$postSection.append(GetNumberInput("setpost.timed_interval|" + camId, "... each (seconds): ", response.data.setpost.timed_interval, 1, 99999));
+						$camprop.append($postSection);
 
 						var collapsible = new CollapsibleSection('mro', "Manual Recording Options", modal_cameraPropDialog);
 						$camprop.append(collapsible.$heading);
@@ -20693,6 +22579,20 @@ function CameraProperties(camId)
 			$infoSection.append(GetInfo("Sub stream", ((cam.width2 * cam.height2) / 1000000).toFixed(1) + "MP, " + cam.FPS2.toFixed(2) + " fps, " + formatBitsPerSecond(cam.BPS2 * 8), cam.width2 + "x" + cam.height2));
 		$infoSection.append(GetInfo("Audio", cam.audio ? "Yes" : "No"));
 		$infoSection.append(GetInfo("Profile", cam.profile));
+		$infoSection.append(GetInfo("Clips", cam.nClips));
+		$infoSection.append(GetInfo("Alerts", cam.nAlerts));
+		$infoSection.append(GetInfo("Triggers", cam.nTriggers));
+		$infoSection.append(GetInfo("No Signal", cam.nNoSignal));
+		var lastAlert = "None";
+		if (cam.alertutc && cam.alertutc > 0)
+		{
+			var diff = Date.now() - (parseInt(cam.alertutc) * 1000);
+			if (diff >= 0)
+			{
+				lastAlert = MsToDHMS(diff) + " ago";
+			}
+		}
+		$infoSection.append(GetInfo("Last Alert", lastAlert));
 		$infoSection.append('<div class="dialogOption_item dialogOption_item_info"><a title="Opens a live H.264 stream in an efficient, cross-platform player. This method delays the stream by several seconds." href="javascript:hlsPlayer.OpenDialog(\'' + JavaScriptStringEncode(camId) + '\')">'
 			+ '<svg class="icon noflip"><use xlink:href="#svg_mio_ViewStream"></use></svg>'
 			+ ' Open HTTP Live Stream (HLS)</a></div>');
@@ -20763,15 +22663,36 @@ function CameraProperties(camId)
 				var v = parseInt($range.val());
 				if (invert)
 					v = (max - v) + min;
-				if (changeTimeout != null)
-					clearTimeout(changeTimeout);
+				clearTimeout(changeTimeout);
 				changeTimeout = setTimeout(function ()
 				{
-					changeTimeout = null;
 					onChange(tag, v);
 				}, 500);
 			}
 		});
+		return $parent;
+	}
+	var GetNumberInput = function (tag, label, value, min, max)
+	{
+		var $parent = $('<div class="dialogOption_item dialogOption_item_info"></div>');
+
+		var $input = $('<input type="number" min="' + min + '" max="' + max + '" />');
+		$input.val(value);
+		$parent.append($input);
+
+		var changeTimeout = null;
+		$input.on('change', function ()
+		{
+			var v = parseInt($input.val());
+			v = Clamp(v, min, max);
+			clearTimeout(changeTimeout);
+			changeTimeout = setTimeout(function ()
+			{
+				camPropNumberChanged(tag, v);
+			}, 500);
+		});
+
+		$parent.append('<div class="dialogOption_label">' + label + '</div>');
 		return $parent;
 	}
 	var percentScalingMethod = function (value, min, max)
@@ -20856,6 +22777,7 @@ function CameraProperties(camId)
 		var camId = parts[1];
 		cameraConfig.set(camId, settingName, value);
 	}
+	var camPropNumberChanged = camPropSliderChanged;
 	var GetSelectRow = function (label, settingKey, options)
 	{
 		var $row = $('<div class="dialogOption_item dialogOption_item_ddl"></div>');
@@ -20981,37 +22903,39 @@ function ClipProperties()
 			$camprop.append(GetInfo("Date", GetDateStr(clipData.displayDate)));
 			if (clipData.isClip)
 				$camprop.append(GetInfo("Real Time", clipData.roughLength).attr("title", "Real Time: Length of real time this clip covers.\nMay be significantly longer than Play Time if created from multiple alerts."));
-			$camprop.append(GetInfo("Play Time", msToTime(clipData.msec)));
+			$camprop.append(GetInfo("Play Time", msToTime(clipData.msec, true), true));
 			if (clipData.isClip)
 				$camprop.append(GetInfo("Size", clipData.fileSize));
 			else
 				$camprop.append(GetInfo("Zones", new AlertZonesMask(clipData.rawData.zones).toString()));
 
-			if ((clipData.flags & alert_flag_sentry_trigger) > 0)
+			$camprop.append(GetInfoEleValue("Resolution", clipData.res));
+
+			if ((clipData.flags & BIDBFLAG_AI_CONFIRMED_X) > 0)
 				$camprop.append(GetIcon("trigger_sentry", "AI-verified alert"));
-			if ((clipData.flags & alert_flag_sentry_occupied) > 0)
+			if ((clipData.flags & BIDBFLAG_AI_OCCUPIED_X) > 0)
 				$camprop.append(GetIcon("trigger_sentry_occupied", "AI-verified continuation of a previous alert"));
-			if ((clipData.flags & alert_flag_trigger_motion) > 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_MOTION) > 0)
 				$camprop.append(GetIcon("trigger_motion", "Triggered by motion detection"));
-			if ((clipData.flags & alert_flag_trigger_audio) > 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_AUDIO) > 0)
 				$camprop.append(GetIcon("trigger_audio", "Triggered by audio"));
-			if ((clipData.flags & alert_flag_trigger_external) > 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_EXTERNAL) > 0)
 				$camprop.append(GetIcon("trigger_external", "Triggered by external source such as DIO or manual trigger"));
-			if ((clipData.flags & alert_flag_trigger_group) > 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_GROUP) > 0)
 				$camprop.append(GetIcon("trigger_group", "The group was triggered"));
-			if ((clipData.flags & clip_flag_audio) > 0)
+			if ((clipData.flags & BIDBFLAG_AUDIO) > 0)
 				$camprop.append(GetIcon("clip_audio", "Clip has audio"));
-			if ((clipData.flags & clip_flag_backingup) > 0)
+			if ((clipData.flags & BIDBFLAG_ARCHIVE) > 0)
 				$camprop.append(GetIcon("clip_backingup", "Clip is currently being backed up"));
-			if ((clipData.flags & clip_flag_backedup) > 0)
+			if ((clipData.flags & BIDBFLAG_ARCHIVED) > 0)
 				$camprop.append(GetIcon("clip_backedup", "Clip has been backed up"));
-			if ((clipData.flags & clip_flag_protect) > 0)
+			if ((clipData.flags & BIDBFLAG_PROTECTED) > 0)
 				$camprop.append(GetIcon("protect", "Item is protected"));
-			if ((clipData.flags & clip_flag_flag) > 0)
+			if ((clipData.flags & BIDBFLAG_FLAGGED) > 0)
 				$camprop.append(GetIcon("flag", "Flagged"));
-			if ((clipData.flags & clip_flag_is_recording) > 0)
+			if ((clipData.flags & BIDBFLAG_RECORDING) > 0)
 				$camprop.append(GetIcon("is_recording", "Clip is still recording"));
-			if ((clipData.flags & alert_flag_nosignal) > 0)
+			if ((clipData.flags & BIDBFLAG_ALERT_NOSIGNAL) > 0)
 				$camprop.append(GetIcon("nosignal", "Camera had no signal"));
 			if (clipData.isNew)
 				$camprop.append(GetIcon("is_new", "Alert is newer than you have seen before"));
@@ -21038,6 +22962,8 @@ function ClipProperties()
 				$camprop.append(GetInfoEleValue("Convert/export", $exportBtn));
 			}
 
+			$camprop.append(GetInfoEleValue("File Name", clipData.rawData.file));
+
 			if (developerMode)
 			{
 				$camprop.append(GetInfo("Flags", InsertSpacesInBinary(dec2bin(clipData.flags), 32)));
@@ -21062,10 +22988,13 @@ function ClipProperties()
 		$iconRow.append(clipLoader.GetClipIcon(icon)).append(label);
 		return $iconRow;
 	}
-	var GetInfo = function (label, value)
+	var GetInfo = function (label, value, isHtml)
 	{
 		var $info = $('<div class="dialogOption_item clipprop_item_info"></div>');
-		$info.text(label + ": " + value);
+		if (isHtml)
+			$info.html(label + ": " + value);
+		else
+			$info.text(label + ": " + value);
 		return $info;
 	}
 	var GetInfoEleValue = function (label, ele)
@@ -21880,7 +23809,7 @@ function ClipExportStreamer(path, startTimeMs, durationMs, useTranscodeMethod, i
 		{
 			setTimeout(function ()
 			{
-				window.URL.revokeObjectURL(dataUri);
+				URL.revokeObjectURL(dataUri);
 			}, 1000);
 		}
 		aviEncoder = null;
@@ -21891,7 +23820,9 @@ function ClipExportStreamer(path, startTimeMs, durationMs, useTranscodeMethod, i
 			console.log("Closed stream");
 		}
 	}
-
+	var headerCallback = function (headers)
+	{
+	}
 	var acceptFrame = function (frame, streams)
 	{
 		if (!exportCompleteCb)
@@ -22004,7 +23935,7 @@ function ClipExportStreamer(path, startTimeMs, durationMs, useTranscodeMethod, i
 		var recordArg = useTranscodeMethod ? "" : "&record=1";
 		var audioArg = "&audio=" + (includeAudio ? "1" : "0");
 		var videoUrl = currentServer.remoteBaseURL + "file/clips/" + path + currentServer.GetAPISessionArg("?", true) + recordArg + audioArg + "&speed=100&stream=0&extend=2&time=" + startTimeMs;
-		safeFetch.OpenStream(videoUrl, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded);
+		safeFetch.OpenStream(videoUrl, headerCallback, acceptFrame, acceptStatusBlock, streamInfoCallback, StreamEnded, {});
 	}
 	if (recordingOffsetWorkaround)
 		DoExportRecordingOffsetWorkaround(beginRecording, path, startTimeMs);
@@ -22024,7 +23955,7 @@ function DoExportRecordingOffsetWorkaround(callbackMethod, path, startTimeMs)
 		}
 	}
 	var videoUrl = currentServer.remoteBaseURL + "file/clips/" + path + currentServer.GetAPISessionArg("?", true) + "&speed=0&audio=0&stream=0&extend=2&w=160&q=10&time=" + startTimeMs;
-	safeFetch.OpenStream(videoUrl, anyCallback, anyCallback, anyCallback, anyCallback);
+	safeFetch.OpenStream(videoUrl, anyCallback, anyCallback, anyCallback, anyCallback, anyCallback, {});
 }
 ///////////////////////////////////////////////////////////////
 // Camera Pause Dialog ////////////////////////////////////////
@@ -23056,6 +24987,8 @@ function PcmAudioPlayer()
 			audioStopTimeout = setTimeout(toggleAudioPlayback, 1000);
 		else
 			toggleAudioPlayback();
+		if (mqttClient)
+			mqttClient.volumeChanged();
 	}
 	this.GetVolume = function ()
 	{
@@ -23243,11 +25176,10 @@ function saveSnapshot(btnSelector)
 	if (typeof btnSelector == "undefined")
 		btnSelector = "#save_snapshot_btn";
 	var camName = cameraListLoader.GetCameraName(videoPlayer.Loading().image.id);
-	var date = GetPaddedDateStr(new Date(videoPlayer.GetCurrentImageTimeMs() + GetServerTimeOffset()), true);
+	var date = GetPaddedDateStr(new Date(videoPlayer.lastFrameUtc + GetServerTimeOffset()), true);
 	date = FormatFileName(date);
 	var fileName = camName + " " + date + ".jpg";
-	var q = Clamp(parseInt(settings.ui3_download_snapshot_server_quality), 0, 100);
-	$(btnSelector).attr("href", videoPlayer.GetLastSnapshotUrl() + "&decode=1&w=99999&q=" + q /* LOC0 */);
+	$(btnSelector).attr("href", videoPlayer.GetLastSnapshotUrl());
 	if (settings.ui3_download_snapshot_method === "Local (JPEG)" || settings.ui3_download_snapshot_method === "Local (PNG)")
 	{
 		var playerEle = videoPlayer.GetPlayerElement();
@@ -23477,7 +25409,7 @@ function MediaSessionController()
 			var duration = 86400;
 			var position = 86400;
 			var playbackRate = 1.0;
-			if (!videoPlayer.Loading().image.isLive)
+			if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 			{
 				var isPlaying = !videoPlayer.Playback_IsPaused();
 				duration = Clamp(videoPlayer.Loading().image.msec - 1, 0, Infinity);
@@ -23534,21 +25466,21 @@ function MediaSessionController()
 			{
 				if (videoPlayer.Loading().image.isLive)
 					videoPlayer.LoadHomeGroup();
-				else
+				else if (!videoPlayer.Loading().image.isTimeline())
 					videoPlayer.Playback_Play();
 			});
 			navigator.mediaSession.setActionHandler('pause', function ()
 			{
 				if (videoPlayer.Loading().image.isLive)
 					videoPlayer.LoadHomeGroup();
-				else
+				else if (!videoPlayer.Loading().image.isTimeline())
 					videoPlayer.Playback_Pause();
 			});
 			navigator.mediaSession.setActionHandler('stop', function ()
 			{
 				if (videoPlayer.Loading().image.isLive)
 					videoPlayer.goLive();
-				else
+				else if (!videoPlayer.Loading().image.isTimeline())
 					clipLoader.CloseCurrentClip();
 			});
 		}
@@ -23561,7 +25493,7 @@ function MediaSessionController()
 		{
 			navigator.mediaSession.setActionHandler('seekbackward', function (details)
 			{
-				if (!videoPlayer.Loading().image.isLive)
+				if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 				{
 					if (details.seekOffset && details.seekOffset > 0)
 						videoPlayer.SeekByMs(-1000 * details.seekOffset);
@@ -23571,7 +25503,7 @@ function MediaSessionController()
 			});
 			navigator.mediaSession.setActionHandler('seekforward', function (details)
 			{
-				if (!videoPlayer.Loading().image.isLive)
+				if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 				{
 					if (details.seekOffset && details.seekOffset > 0)
 						videoPlayer.SeekByMs(1000 * details.seekOffset);
@@ -23581,7 +25513,7 @@ function MediaSessionController()
 			});
 			navigator.mediaSession.setActionHandler('seekto', function (details)
 			{
-				if (!videoPlayer.Loading().image.isLive)
+				if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 				{
 					if (details.seekTime || details.seekTime === 0)
 					{
@@ -23607,7 +25539,7 @@ function MediaSessionController()
 			{
 				if (videoPlayer.Loading().image.isLive)
 					BI_Hotkey_PreviousCamera();
-				else
+				else if (!videoPlayer.Loading().image.isTimeline())
 					videoPlayer.Playback_PreviousClip();
 			});
 
@@ -23615,7 +25547,7 @@ function MediaSessionController()
 			{
 				if (videoPlayer.Loading().image.isLive)
 					BI_Hotkey_NextCamera();
-				else
+				else if (!videoPlayer.Loading().image.isTimeline())
 					videoPlayer.Playback_NextClip();
 			});
 		}
@@ -23772,6 +25704,7 @@ function MaximizedModeController()
 			$("#layoutleft,#layouttop").show();
 		this.updateMaximizeButtonState();
 		clipLoader && clipLoader.RedrawClipList();
+		BI_CustomEvent.Invoke("MaximizeChanged", settings.ui3_is_maximized === "1");
 	}
 	this.EnableMaximizedMode = function ()
 	{
@@ -23889,7 +25822,14 @@ function AjaxHistoryManager()
 	var BackButtonPressed = function ()
 	{
 		var loading = videoPlayer.Loading();
-		if (!loading.image.isLive)
+		if (loading.image.isTimeline())
+		{
+			if (!cameraListLoader.CameraIsGroupOrCycle(loading.cam))
+				videoPlayer.LoadHomeGroup();
+			else
+				videoPlayer.goLive();
+		}
+		else if (!loading.image.isLive)
 			clipLoader.CloseCurrentClip();
 		else if (!loading.image.isGroup)
 			videoPlayer.LoadHomeGroup();
@@ -23903,57 +25843,80 @@ function AjaxHistoryManager()
 //////////////////////////////////////////////////////////////////////
 // Update Current URL ////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////
-var lastUpdateCurrentUrlTime = 0;
-var updateCurrentUrl_Timeout = null;
-function UpdateCurrentURL_Throttled()
-{
-	if (!html5HistorySupported)
-		return;
-	var t = performance.now() - lastUpdateCurrentUrlTime;
-	if (t > 1000)
-		UpdateCurrentURL();
-	else
-	{
-		if (!updateCurrentUrl_Timeout)
-			updateCurrentUrl_Timeout = setTimeout(UpdateCurrentURL, 1000 - t);
-	}
-}
 function UpdateCurrentURL()
 {
-	if (!html5HistorySupported)
+	if (!html5HistorySupported || !loadingHelper.DidLoadingFinish())
 		return;
-	clearTimeout(updateCurrentUrl_Timeout);
-	updateCurrentUrl_Timeout = null;
-	lastUpdateCurrentUrlTime = performance.now();
-	var search = location.search;
-	var m = search.match("([&?]rec=)[^#&?]*");
-	if (m)
-		search = search.substr(0, m.index) + search.substr(m.index + m[0].length);
+	var search = new URLSearchParams(location.search);
+	search.delete("rec");
+	search.delete("timeline");
+	search.delete("cam");
+	search.delete("group");
+
 	var cli = videoPlayer.Loading().image;
-	if (!cli.isLive)
+	if (cli.isTimeline())
+		search.set("timeline", clipTimeline.getCurrentTime());
+	else if (!cli.isLive)
 	{
 		var clipData = clipLoader.GetClipFromId(cli.uniqueId);
 		if (clipData)
 		{
-			if (search === "")
-				search = "?";
-			else
-				search += "&";
-			search += "rec=" + encodeURIComponent(clipData.recId);
+			var val = clipData.recId;
 			var offset = videoPlayer.GetClipPlaybackPositionMs();
 			if (offset > 0)
-				search += "-" + offset;
+				val += "-" + offset;
+			search.set("rec", val);
 		}
 	}
+	if (cli.isLive || cli.isTimeline())
+		search.set(cli.isGroup ? "group" : "cam", cli.id);
+
+	search = search.toString();
+	if (search.length)
+		search = "?" + search;
+
 	var newUrl = location.origin + location.pathname + search + location.hash;
-	try
+	if (location.href !== newUrl)
 	{
-		history.replaceState(history.state, "", newUrl);
+		try
+		{
+			history.replaceState(history.state, "", newUrl);
+		}
+		catch (ex)
+		{
+			console.error(ex);
+		}
 	}
-	catch (ex)
+}
+BindEventsPassive(document, "mouseleave", UpdateCurrentURL);
+/**
+ * Returns the URL with the specified URL parameters removed. First argument is the string containing URL parameters. All following arguments must be URL parameter names. If the URL contains a question mark, it will still exist in the return value.
+ * @param {String} url URL.
+ */
+function RemoveUrlParameters(url)
+{
+	var root = "";
+	var search = url;
+	var idxQmark = search.indexOf("?");
+	if (idxQmark > -1)
 	{
-		console.error(ex);
+		root = search.substr(0, idxQmark + 1);
+		search = search.substr(idxQmark + 1);
 	}
+	search = new URLSearchParams(search);
+	for (var i = 1; i < arguments.length; i++)
+	{
+		search.delete(arguments[i]);
+	}
+	return root + search.toString();
+}
+/**
+ * Returns "?" if the given string does not have one in it already, otherwise returns "&".
+ * @param {String} url URL.
+ */
+function GetUrlParameterSeparator(url)
+{
+	return url.indexOf("?") > -1 ? "&" : "?";
 }
 //////////////////////////////////////////////////////////////////////
 // Hotkeys ///////////////////////////////////////////////////////////
@@ -23973,6 +25936,10 @@ function BI_Hotkey_Load_Tab_Live()
 function BI_Hotkey_Load_Tab_Clips()
 {
 	$('.topbar_tab[name="clips"]').click();
+}
+function BI_Hotkey_Load_Tab_Timeline()
+{
+	$('.topbar_tab[name="timeline"]').click();
 }
 function BI_Hotkey_Toggle_Camera_Labels()
 {
@@ -23999,12 +25966,13 @@ function LoadNextOrPreviousCamera(offset)
 {
 	if (offset == 0)
 		return;
+	// Not supported during timeline playback, simply because the default hotkey for next/previous camera is shared with next/previous frame, and I can only choose one to work for timeline playback
 	var loading = videoPlayer.Loading();
 	if (!loading.image.isLive || cameraListLoader.CameraIsCycle(loading.cam))
 		return;
 	var groupCamera = videoPlayer.GetCurrentHomeGroupObj();
 	var idxCurrentMaximizedCamera = -1;
-	var cams = cameraListLoader.GetGroupCams(groupCamera.optionValue, "latest");
+	var cams = cameraListLoader.GetGroupCams(groupCamera.optionValue);
 	if (!cams)
 	{
 		toaster.Error('Can not load next or previous camera because group "' + groupCamera.optionDisplay + '" has invalid layout metadata.');
@@ -24026,7 +25994,8 @@ function LoadNextOrPreviousCamera(offset)
 			idxCurrentMaximizedCamera = cams.length;
 	}
 
-	while (true)
+	var iterations = 1000;
+	while (iterations-- > 0)
 	{
 		idxCurrentMaximizedCamera += offset;
 		if (idxCurrentMaximizedCamera < 0 || idxCurrentMaximizedCamera >= cams.length)
@@ -24052,7 +26021,7 @@ function BI_Hotkey_PreviousGroup()
 function LoadNextOrPreviousGroup(offset)
 {
 	var loading = videoPlayer.Loading();
-	if (!loading.image.isLive)
+	if (!loading.image.isLive && !loading.image.isTimeline())
 		return;
 	var groupCamera = videoPlayer.GetCurrentHomeGroupObj();
 	var groupList = cameraListLoader.GetGroupAndCycleList();
@@ -24088,7 +26057,7 @@ function BI_Hotkey_Delete()
 }
 function BI_Hotkey_ToggleReverse()
 {
-	if (!videoPlayer.Loading().image.isLive)
+	if (!videoPlayer.Loading().image.isLive && !videoPlayer.Loading().image.isTimeline())
 		playbackControls.ToggleReverse();
 }
 function BI_Hotkey_NextClip()
@@ -24147,30 +26116,45 @@ function BI_Hotkey_PlaybackSlower()
 }
 function BI_Hotkey_CloseClip()
 {
-	if (!videoPlayer.Loading().image.isLive)
+	if (suppress_Hotkey_CloseClip)
+		return;
+	if (videoPlayer.Loading().image.isTimeline())
+	{
+		if (cameraListLoader.CameraIsGroupOrCycle(videoPlayer.Loading().cam))
+			videoPlayer.goLive();
+	}
+	else if (!videoPlayer.Loading().image.isLive)
 	{
 		clipLoader.CloseCurrentClip();
 		// Prevent this same hotkey event from closing the current camera, too.
-		suppress_Hotkey_CloseCamera = true;
-		setTimeout(function () { suppress_Hotkey_CloseCamera = false; }, 0);
+		clearTimeout(suppress_Hotkey_CloseCamera);
+		suppress_Hotkey_CloseCamera = setTimeout(function () { suppress_Hotkey_CloseCamera = null; }, 0);
 	}
 }
-var suppress_Hotkey_CloseCamera = false;
+var suppress_Hotkey_CloseClip = null;
+var suppress_Hotkey_CloseCamera = null;
 function BI_Hotkey_CloseCamera()
 {
 	if (suppress_Hotkey_CloseCamera)
 		return;
 	var loading = videoPlayer.Loading();
-	if (loading.image.isLive && !loading.image.isGroup)
+	if ((loading.image.isLive || videoPlayer.Loading().image.isTimeline()) && !cameraListLoader.CameraIsGroupOrCycle(videoPlayer.Loading().cam))
+	{
 		videoPlayer.ImgClick_Camera(loading.cam);
+		if (videoPlayer.Loading().image.isTimeline())
+		{
+			clearTimeout(suppress_Hotkey_CloseClip);
+			suppress_Hotkey_CloseClip = setTimeout(function () { suppress_Hotkey_CloseClip = null; }, 0);
+		}
+	}
 }
 function BI_Hotkey_DigitalZoomIn()
 {
-	imageRenderer.DigitalZoomNow(100, true);
+	imageRenderer.DigitalZoomNow(1, true);
 }
 function BI_Hotkey_DigitalZoomOut()
 {
-	imageRenderer.DigitalZoomNow(-100, true);
+	imageRenderer.DigitalZoomNow(-1, true);
 }
 function BI_Hotkey_DigitalPanUp()
 {
@@ -24245,10 +26229,14 @@ function BI_Hotkeys()
 	$(document).keydown(function (e)
 	{
 		var charCode = e.which;
+		if (charCode === 116 || (e.ctrlKey && charCode === 82)) // F5 or (ctrl+R)
+			UpdateCurrentURL();
 		if (!charCode
 			|| $("body").children(".dialog_overlay").length !== 0
 			|| $("body").children(".dialog_wrapper").children(".streamingProfileEditorPanel").length !== 0)
 			return;
+		if (e.ctrlKey)
+			relativePTZ.setToggleButtonState(true);
 		var hotkeysBeingRepeated = currentlyDownKeys[charCode];
 		if (hotkeysBeingRepeated)
 		{
@@ -24309,6 +26297,7 @@ function BI_Hotkeys()
 	});
 	$(document).keyup(function (e)
 	{
+		relativePTZ.setToggleButtonState();
 		var charCode = e.which;
 		if (!charCode)
 			return;
@@ -24381,6 +26370,7 @@ function BI_Hotkeys()
 
 	this.getKeyName = function (charCode)
 	{
+		charCode = parseInt(charCode);
 		var name = charCodeToKeyNameMap[charCode];
 		if (typeof name == "undefined")
 			name = String.fromCharCode(charCode);
@@ -24873,12 +26863,16 @@ function RollingAverage(MAXSAMPLES)
 		return (ticksum / numTicks);
 	}
 }
-///////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////
 // Efficient Timed Average Calculator ///////////////////////
-///////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////
+/**
+ * Calculates the average of values provided for a limited time. The timer starts upon the first Add operation. The Add method becomes a no-op when the timer reaches time time limit and [minRecords] or more items have been added.
+ * @param {Number} maxMs Time limit.
+ * @param {Number} minRecords Minimum number of records to keep.
+ */
 function TimedAverage(maxMs, minRecords)
 {
-	/// <summary>Calculates the average of values provided for a limited time. The timer starts upon the first Add operation.</summary>
 	var self = this;
 	var itemCount = 0;
 	var sum = 0;
@@ -24935,74 +26929,6 @@ function FailLimiter(maxFailsInTimePeriod, timePeriodMs)
 	}
 }
 ///////////////////////////////////////////////////////////////
-// Host Redirection ///////////////////////////////////////////
-// Incomplete / Placeholder ///////////////////////////////////
-///////////////////////////////////////////////////////////////
-var currentServer =
-{
-	remoteBaseURL: GetAppPath()
-	, remoteServerName: ""
-	, remoteServerUser: ""
-	, remoteServerPass: ""
-	, isLoggingOut: false
-	, isUsingRemoteServer: false
-	, GetAPISessionArg: function (prefix, forceAddArg)
-	{
-		if (currentServer.isUsingRemoteServer || !navigator.cookieEnabled || forceAddArg)
-			return prefix + "session=" + sessionManager.GetAPISession();
-		return "";
-	}
-	, GetLocalSessionArg: function (prefix, forceAddArg)
-	{
-		if (!navigator.cookieEnabled || forceAddArg)
-		{
-			if (sessionManager)
-				return prefix + "session=" + sessionManager.GetLocalSession();
-			else
-				toaster.Error("Attempted to access sessionManager before it was initialized.");
-		}
-		return "";
-	}
-	, SetRemoteServer: function (serverName, baseUrl, user, pass)
-	{
-		if (!currentServer.ValidateRemoteServerNameSimpleRules(serverName))
-		{
-			toaster.Error("Unable to validate remote server name. Connecting to local server instead.", 10000);
-			serverName = "";
-		}
-		if (serverName == "")
-		{
-			currentServer.remoteBaseURL = GetAppPath();
-			currentServer.remoteServerName = "";
-			currentServer.remoteServerUser = "";
-			currentServer.remoteServerPass = "";
-			currentServer.isUsingRemoteServer = false;
-		}
-		else
-		{
-			currentServer.remoteBaseURL = baseUrl;
-			currentServer.remoteServerName = serverName;
-			currentServer.remoteServerUser = user;
-			currentServer.remoteServerPass = pass;
-			currentServer.isUsingRemoteServer = true;
-		}
-	}
-	, ValidateRemoteServerNameSimpleRules: function (val)
-	{
-		if (val.length == 0)
-			return false;
-		if (val.length > 16)
-			return false;
-		for (var i = 0; i < val.length; i++)
-		{
-			var c = val.charAt(i);
-			if ((c < "a" || c > "z") && (c < "A" || c > "Z") && (c < "0" || c > "9") && c != " ")
-				return false;
-		}
-		return true;
-	}
-};
-///////////////////////////////////////////////////////////////
 // Custom Events //////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 var BI_CustomEvent =
@@ -25013,6 +26939,7 @@ var BI_CustomEvent =
 		if (typeof this.customEventRegistry[eventName] == "undefined")
 			this.customEventRegistry[eventName] = new Array();
 		this.customEventRegistry[eventName].push(eventHandler);
+		return function () { BI_CustomEvent.RemoveListener(eventName, eventHandler); }
 	},
 	RemoveListener: function (eventName, eventHandler)
 	{
@@ -25108,6 +27035,7 @@ function LoadingHelper()
 {
 	var self = this;
 	var loadingFinished = false;
+	var loadingFinishedAtServerTime = 0;
 	var things =
 		[
 			// name, selector, isLoaded
@@ -25118,6 +27046,7 @@ function LoadingHelper()
 			, ["svg", "#loadingSVG", false]
 			, ["h264", "#loadingH264", false]
 			, ["startupClip", "#loadingStartupClip", false]
+			, ["timeline", "#loadingTimeline", false]
 		];
 
 	this.SetLoadedStatus = function (name)
@@ -25167,6 +27096,7 @@ function LoadingHelper()
 		}
 		ajaxHistoryManager = new AjaxHistoryManager();
 		loadingFinished = true;
+		loadingFinishedAtServerTime = GetUtcNow();
 		$("#loadingmsgwrapper").remove();
 		resized();
 		videoPlayer.Initialize();
@@ -25176,6 +27106,10 @@ function LoadingHelper()
 	this.DidLoadingFinish = function ()
 	{
 		return loadingFinished;
+	}
+	this.GetLoadingFinishedTime = function ()
+	{
+		return loadingFinishedAtServerTime;
 	}
 	$(window).load(function ()
 	{
@@ -25214,7 +27148,7 @@ function DisableIEWarning()
 // Logging ////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 if (!console)
-	console = {};
+	window.console = {};
 if (typeof console.log !== "function")
 	console.log = function () { };
 if (typeof console.error !== "function")
@@ -25237,10 +27171,13 @@ function ArrayToHtmlTable(a)
 	{
 		for (var key in a[i])
 		{
-			if (typeof columnSpec[key] == "undefined")
+			if (Object.prototype.hasOwnProperty.call(a[i], key))
 			{
-				$theadrow.append($("<th></th>").text(key));
-				columnSpec[key] = columnIdx++;
+				if (typeof columnSpec[key] == "undefined")
+				{
+					$theadrow.append($("<th></th>").text(key));
+					columnSpec[key] = columnIdx++;
+				}
 			}
 		}
 	}
@@ -25249,9 +27186,12 @@ function ArrayToHtmlTable(a)
 		var newRow = new Object();
 		for (var key in a[i])
 		{
-			var value = a[i][key];
-			var idx = columnSpec[key];
-			newRow[idx] = value;
+			if (Object.prototype.hasOwnProperty.call(a[i], key))
+			{
+				var value = a[i][key];
+				var idx = columnSpec[key];
+				newRow[idx] = value;
+			}
 		}
 		var $row = $("<tr></tr>");
 		for (var n = 0; n < columnIdx; n++)
@@ -25319,7 +27259,6 @@ function PersistImageFromUrl(settingsKey, url, onSuccess, onFail)
 	var tmpImg = document.createElement("img");
 	tmpImg.crossOrigin = "Anonymous";
 	var $tmpImg = $(tmpImg);
-	$("#preloadcontainer").append(tmpImg);
 	$tmpImg.load(function ()
 	{
 		if (!this.complete || typeof this.naturalWidth == "undefined" || this.naturalWidth == 0)
@@ -25373,6 +27312,106 @@ function PersistImageFromUrl(settingsKey, url, onSuccess, onFail)
 	$tmpImg.attr("src", url);
 }
 ///////////////////////////////////////////////////////////////
+// Load jpeg images with HTTP headers /////////////////////////
+///////////////////////////////////////////////////////////////
+/**
+ * Loads the specified resource as a Data URI and provides access to the response headers.
+ * Returns a promise that resolves with { dataUri: "...", headers: { key: value } }
+ * Most rejections will include an argument that has status and statusText fields.
+ * @param {String} url URL of any resource that can be downloaded and converted into a Data URI.
+ */
+function DownloadToDataUri(url)
+{
+	return new Promise(function (resolve, reject)
+	{
+		// Handles most browsers with a fallback for IE9
+		var hasUint8Array = !!window.Uint8Array;
+		if (!window.Uint8Array && !window.VBArray)
+		{
+			reject({ status: 0, statusText: "Unsupported web browser" });
+			return;
+		}
+		var xhr = new XMLHttpRequest();
+		xhr.open("GET", url, true);
+		if (hasUint8Array)
+			xhr.responseType = "arraybuffer";
+		xhr.onload = function ()
+		{
+			if (xhr.status >= 200 && xhr.status < 300)
+			{
+				var arr;
+				var dataUri;
+				//var start = performance.now();
+				if (hasUint8Array)
+				{
+					arr = new Uint8Array(xhr.response);
+					var imgData = new Blob([arr], { type: "application/octet-binary" });
+					dataUri = URL.createObjectURL(imgData);
+				}
+				else
+				{
+					arr = xhr.responseBody.toArray();
+					dataUri = "data:image/jpg;base64," + base64Array(arr);
+				}
+				//var end = performance.now();
+				//console.log(arr.length + " bytes to base64 took " + (end - start).toFixed(1) + "ms");
+				var headerStr = xhr.getAllResponseHeaders();
+				var headerArr = headerStr.trim().split(/[\r\n]+/);
+				var headerMap = {};
+				for (var i = 0; i < headerArr.length; i++)
+				{
+					var parts = headerArr[i].split(': ');
+					var header = parts.shift().toLowerCase();
+					var value = parts.join(': ');
+					headerMap[header] = value;
+				}
+				resolve({ dataUri: dataUri, headers: headerMap, imageSizeBytes: arr.length });
+			}
+			else
+				reject({ status: xhr.status, statusText: xhr.statusText });
+		};
+		xhr.onerror = function ()
+		{
+			var failure = { status: xhr.status, statusText: xhr.statusText };
+			if (failure.status === 0 && !failure.statusText)
+				failure.statusText = "Connection timed out";
+			reject(failure);
+		};
+		xhr.send();
+	});
+}
+/**
+ * Loads the image described by the specified Uri. Also accepts a headers object which will be passed through to the resolve or reject handlers of the promise.
+ * Returns a promise that resolves or rejects with the argument { image: HTMLImageElement, headers: headers }
+ * @param {String} url Image Uri
+ * @param {Object} headers Optional object containing HTTP headers to deliver along with the final image.
+ * @param {Number} imageSizeBytes Size of the image, in bytes. Omit if unknown.
+ */
+function LoadImagePromise(url, headers, imageSizeBytes)
+{
+	return new Promise(function (resolve, reject)
+	{
+		var image = new Image();
+		image.setAttribute("crossOrigin", "Anonymous");
+		image.onload = function ()
+		{
+			if (url.substr(0, 5) === "blob:")
+				URL.revokeObjectURL(url);
+			if (image.complete && image.naturalWidth && image.naturalHeight)
+				resolve({ image: image, headers: headers, imageSizeBytes: imageSizeBytes });
+			else
+				reject({ image: image, headers: headers, imageSizeBytes: imageSizeBytes });
+		};
+		image.onerror = function ()
+		{
+			if (url.substr(0, 5) === "blob:")
+				URL.revokeObjectURL(url);
+			reject({ image: image, headers: headers, imageSizeBytes: imageSizeBytes });
+		};
+		image.src = url;
+	});
+}
+///////////////////////////////////////////////////////////////
 // Fetch /video/ h.264 streaming //////////////////////////////
 ///////////////////////////////////////////////////////////////
 var safeFetch = new (function ()
@@ -25390,9 +27429,9 @@ var safeFetch = new (function ()
 	var queuedRequest = null;
 	var stopTimeout = null;
 	var streamEndedCbForActiveFetch = null;
-	this.OpenStream = function (url, frameCallback, statusBlockCallback, streamInfoCallback, streamEnded)
+	this.OpenStream = function (url, headerCallback, frameCallback, statusBlockCallback, streamInfoCallback, streamEnded, options)
 	{
-		queuedRequest = { url: url, frameCallback: frameCallback, statusBlockCallback: statusBlockCallback, streamInfoCallback: streamInfoCallback, streamEnded: streamEnded, activated: false };
+		queuedRequest = { url: url, headerCallback: headerCallback, frameCallback: frameCallback, statusBlockCallback: statusBlockCallback, streamInfoCallback: streamInfoCallback, streamEnded: streamEnded, options: options, activated: false };
 		if (streamer)
 		{
 			// A fetch stream is currently active.  Try to stop it.
@@ -25426,7 +27465,7 @@ var safeFetch = new (function ()
 		}
 		queuedRequest.activated = true;
 		streamEndedCbForActiveFetch = queuedRequest.streamEnded;
-		streamer = new FetchVideoH264Streamer(queuedRequest.url, queuedRequest.frameCallback, queuedRequest.statusBlockCallback, queuedRequest.streamInfoCallback, StreamEndedWrapper);
+		streamer = new FetchVideoH264Streamer(queuedRequest.url, queuedRequest.headerCallback, queuedRequest.frameCallback, queuedRequest.statusBlockCallback, queuedRequest.streamInfoCallback, StreamEndedWrapper, queuedRequest.options);
 	}
 	var StreamEndedWrapper = function (message, wasJpeg, wasAppTriggered, videoFinishedStreaming, responseError)
 	{
@@ -25447,7 +27486,7 @@ var safeFetch = new (function ()
 	}
 })();
 var UINT32_MAX = 4294967296;
-function FetchVideoH264Streamer(url, frameCallback, statusBlockCallback, streamInfoCallback, streamEnded)
+function FetchVideoH264Streamer(url, headerCallback, frameCallback, statusBlockCallback, streamInfoCallback, streamEnded, options)
 {
 	var self = this;
 	var cancel_streaming = false;
@@ -25479,13 +27518,10 @@ function FetchVideoH264Streamer(url, frameCallback, statusBlockCallback, streamI
 	var audioHeader = null;
 	var abort_controller = null;
 	var responseError = null;
-	var playRate = 1;
-	if (url)
-	{
-		var m = url.match(/[?&]speed=(-?\d+\.?\d*)/i);
-		if (m)
-			playRate = parseFloat(m[1]) / 100;
-	}
+
+	options = $.extend({
+		timestampScale: 1
+	}, options);
 
 	this.StopStreaming = function ()
 	{
@@ -25549,48 +27585,60 @@ function FetchVideoH264Streamer(url, frameCallback, statusBlockCallback, streamI
 					HandleGroupableConnectionError();
 					CallStreamEnded("Server responded saying service is unavailable");
 				}
-				else if (res.headers.get("Content-Type") == "image/jpeg")
+				else
 				{
-					var blobPromise = res.blob();
-					blobPromise.then(function (jpegBlob)
+					try
 					{
-						try
+						headerCallback(res.headers);
+					}
+					catch (e)
+					{
+						toaster.Error(e);
+					}
+
+					if (res.headers.get("Content-Type") == "image/jpeg")
+					{
+						var blobPromise = res.blob();
+						blobPromise.then(function (jpegBlob)
 						{
-							if (!currentServer.isUsingRemoteServer && parseInt(res.headers.get("Content-Length")) != jpegBlob.size)
-							{
-								// Apparently we aren't allowed to read the Content-Length header if this is a remote server.
-								CallStreamEnded("fetch graceful exit (jpeg incomplete)", true, true);
-								return;
-							}
-							var jpegObjectURL = URL.createObjectURL(jpegBlob);
 							try
 							{
-								CallFrameCallback({ startTime: startTime, jpeg: jpegObjectURL, isVideo: true }, 1);
+								if (!currentServer.isUsingRemoteServer && parseInt(res.headers.get("Content-Length")) != jpegBlob.size)
+								{
+									// Apparently we aren't allowed to read the Content-Length header if this is a remote server.
+									CallStreamEnded("fetch graceful exit (jpeg incomplete)", true, true);
+									return;
+								}
+								var jpegObjectURL = URL.createObjectURL(jpegBlob);
+								try
+								{
+									CallFrameCallback({ startTime: startTime, jpeg: jpegObjectURL, isVideo: true }, 1);
+								}
+								catch (e)
+								{
+									toaster.Error(e);
+								}
+								CallStreamEnded("fetch graceful exit (jpeg)", true, true);
 							}
 							catch (e)
 							{
 								toaster.Error(e);
 							}
-							CallStreamEnded("fetch graceful exit (jpeg)", true, true);
 						}
-						catch (e)
+						)["catch"](function (e)
 						{
-							toaster.Error(e);
-						}
-					})
-					["catch"](function (e)
+							CallStreamEnded(e);
+						});
+						return blobPromise;
+					}
+					else
 					{
-						CallStreamEnded(e);
-					});
-					return blobPromise;
-				}
-				else
-				{
-					if (!res.ok)
-						responseError = res.status + " " + res.statusText;
-					// Do NOT return before the first reader.read() or the fetch can be left in a bad state!
-					reader = res.body.getReader();
-					return pump(reader);
+						if (!res.ok)
+							responseError = res.status + " " + res.statusText;
+						// Do NOT return before the first reader.read() or the fetch can be left in a bad state!
+						reader = res.body.getReader();
+						return pump(reader);
+					}
 				}
 			}
 			catch (e)
@@ -25774,8 +27822,8 @@ function FetchVideoH264Streamer(url, frameCallback, statusBlockCallback, streamI
 								lastVideoFrameTime = currentVideoFrame.time;
 
 								currentVideoFrame.time -= baseVideoFrameTime;
-								if (playRate !== 0)
-									currentVideoFrame.time = Math.round(currentVideoFrame.time / playRate);
+								if (options.timestampScale !== 0)
+									currentVideoFrame.time = Math.round(currentVideoFrame.time / options.timestampScale);
 								currentVideoFrame.time = Math.abs(currentVideoFrame.time);
 							}
 
@@ -26169,10 +28217,11 @@ function UI3NerdStats()
 		[
 			"Viewport"
 			, "Stream Resolution"
+			, "Requested Res"
 			, "Seek Position"
 			, "Frame Time"
+			, "Stream Timestamp"
 			, "Codecs"
-			, "Jpeg Loading Time"
 			, "Video Bit Rate"
 			, "Audio Bit Rate"
 			, "Audio Buffer"
@@ -26182,6 +28231,9 @@ function UI3NerdStats()
 			, "Network Delay"
 			, "Player Delay"
 			, "Delayed Frames"
+			, "Jpeg Bit Rate"
+			, "Jpeg Frame Size"
+			, "Jpeg Loading Time"
 		];
 	this.statClickEvents = [
 		{ name: "Audio Bit Rate", handler: CreateAudioVisualizer },
@@ -26231,9 +28283,12 @@ function UI3NerdStats()
 	{
 		return dialog != null;
 	}
+	/**
+	 * Creates a row for the specified statistic if it does not already exist.
+	 * @param {String} name Row Name
+	 */
 	var CreateStat = function (name)
 	{
-		/// <summary>Creates a row for the specified statistic if it does not already exist.</summary>
 		if (!dialog)
 			return;
 		var row = statsRows[name];
@@ -26244,9 +28299,9 @@ function UI3NerdStats()
 			dialog.contentChanged(false, true);
 		}
 	}
+	/** Marks all rows to be hidden during [EndUpdate] unless their values are set during the update. */
 	this.BeginUpdate = function ()
 	{
-		/// <summary>Marks all rows to be hidden during [EndUpdate] unless their values are set during the update.</summary>
 		if (isUpdating)
 			return;
 		Initialize();
@@ -26255,9 +28310,9 @@ function UI3NerdStats()
 		for (var i = 0; i < self.orderedStatNames.length; i++)
 			hideOnEndUpdate[self.orderedStatNames[i]] = true;
 	}
+	/** Hides all rows that were not updated since [BeginUpdate] was called. */
 	this.EndUpdate = function ()
 	{
-		/// <summary>Hides all rows that were not updated since [BeginUpdate] was called.</summary>
 		if (!isUpdating)
 			return;
 		Initialize();
@@ -26272,9 +28327,15 @@ function UI3NerdStats()
 		if (hidSome)
 			dialog.contentChanged(false, true);
 	}
+	/**
+	 * Adds or updates the value with the specified name.
+	 * @param {String} name Row Name
+	 * @param {any} value Raw value
+	 * @param {any} htmlValue HTML-formatted value
+	 * @param {Boolean} onGraph If true, graph the raw value.
+	 */
 	this.UpdateStat = function (name, value, htmlValue, onGraph)
 	{
-		/// <summary>Adds or updates the value with the specified name.</summary>
 		if (!dialog)
 			return;
 		Initialize();
@@ -26289,9 +28350,12 @@ function UI3NerdStats()
 			hideOnEndUpdate[name] = false;
 		row.SetValue(value, htmlValue, onGraph);
 	}
+	/**
+	 * Immediately hides the specified row.  Designed to be called outside of an organized update.
+	 * @param {String} name Row Name
+	 */
 	this.HideStat = function (name)
 	{
-		/// <summary>Immediately hides the specified row.  Designed to be called outside of an organized update.</summary>
 		if (!dialog)
 			return;
 		Initialize();
@@ -27228,13 +29292,14 @@ function UISettingsPanel()
 			if (processFilter({ label: "Reset All Settings" }))
 				rowIdx = Add_ResetAllSettingsButton(cat, rowIdx);
 		}
+		var allCreated = [];
 		for (var i = 0; i < defaultSettings.length; i++)
 		{
 			var s = defaultSettings[i];
 			var isDisplayable = (s.label || (s.comment && s.inputType === "comment")) && s.category === category;
 			if (isDisplayable && (typeof s.preconditionFunc !== "function" || s.preconditionFunc()) && processFilter(s))
 			{
-				var $row = $('<div class="uiSettingsRow"></div>');
+				var $row = $('<div class="uiSettingsRow withDefaultBtn"></div>');
 				if (s.hint && s.hint.length > 0)
 					$row.attr('title', s.hint);
 				if (rowIdx++ % 2 === 1)
@@ -27244,28 +29309,16 @@ function UISettingsPanel()
 					, value: settings.getItem(s.key)
 					, label: s.label
 					, tag: s
+					, defaultValue: s.value
+					, class: s.class
 				};
 				if (s.hotkey)
 				{
-					var $input = $('<input type="text" />');
-					AddKeydownEventToElement(HandleHotkeyChange, s, $input);
-					var val = settings.getItem(s.key);
-					if (!val)
-						val = "";
-					var parts = val.split("|");
-					if (parts.length < 4)
-						$input.val("unset");
-					else
-						$input.val((parts[0] === "1" ? "CTRL + " : "")
-							+ (parts[1] === "1" ? "ALT + " : "")
-							+ (parts[2] === "1" ? "SHIFT + " : "")
-							+ hotkeys.getKeyName(parts[3]));
-					$row.addClass('dialogOption_item dialogOption_item_info');
-					$row.append($input);
-					var label = s.label;
+					formFields.inputType = "hotkey";
+					formFields.onChange = HandleHotkeyChange;
 					if (!fullscreen_supported && s.key === 'ui3_hotkey_togglefullscreen')
-						label += '<br>(Unavailable)';
-					$row.append(GetDialogOptionLabel(label));
+						formFields.label += '<br>(Unavailable)';
+					$row.append(UIFormField(formFields));
 				}
 				else if (s.inputType === "checkbox")
 				{
@@ -27286,7 +29339,6 @@ function UISettingsPanel()
 					formFields.maxValue = s.maxValue;
 					formFields.step = s.step;
 					formFields.onChange = NumberChanged;
-					formFields.defaultValue = s.value;
 					if (s.inputType === "range")
 					{
 						if (s.changeOnStep)
@@ -27295,17 +29347,30 @@ function UISettingsPanel()
 					}
 					$row.append(UIFormField(formFields));
 				}
+				else if (s.inputType === "threeState")
+				{
+					formFields.onChange = ThreeStateChanged;
+					$row.append(UIFormField(formFields));
+				}
 				else if (s.inputType === "comment")
 				{
 					var comment = typeof s.comment === "function" ? s.comment() : s.comment;
 					$row.append(GetDialogOptionLabel(comment));
 				}
-				else if (s.inputType === "text" || s.inputType === "color")
+				else if (s.inputType === "text" || s.inputType === "color" || s.inputType === "password")
 				{
-					formFields.onChange = TextChanged;
+					if (s.inputType === "password")
+					{
+						formFields.onChange = PasswordChanged;
+						formFields.value = Base64.decode(formFields.value);
+					}
+					else
+						formFields.onChange = TextChanged;
+					formFields.maxValue = s.maxValue;
 					$row.append(UIFormField(formFields));
 				}
 				cat.$section.append($row);
+				allCreated.push(s);
 			}
 		}
 		if (category === "Extra")
@@ -27324,6 +29389,21 @@ function UISettingsPanel()
 		{
 			$content.append(cat.$heading);
 			$content.append(cat.$section);
+			for (var i = 0; i < allCreated.length; i++)
+			{
+				var s = allCreated[i];
+				if (typeof s.onCreate === "function")
+				{
+					try
+					{
+						s.onCreate();
+					}
+					catch (ex)
+					{
+						toaster.Error(ex);
+					}
+				}
+			}
 			return true;
 		}
 		return false;
@@ -27457,7 +29537,7 @@ function UISettingsPanel()
 				if (typeof s === "string")
 					s = JSON.parse(s);
 				for (var key in s)
-					if (s.hasOwnProperty(key))
+					if (Object.prototype.hasOwnProperty.call(s, key))
 						localStorage.setItem(key, s[key]);
 				return true;
 			}
@@ -27598,31 +29678,20 @@ function UISettingsPanel()
 		settings.setItem(s.key, $input.val());
 		CallOnChangeCallback(s);
 	}
-	var HandleHotkeyChange = function (e, s, $input)
+	var PasswordChanged = function (e, s, $input)
 	{
-		var charCode = e.which ? e.which : event.keyCode;
-
-		var modifiers = "";
-		if (e.ctrlKey)
-			modifiers += "CTRL + ";
-		if (e.altKey)
-			modifiers += "ALT + ";
-		if (e.shiftKey)
-			modifiers += "SHIFT + ";
-
-		var keyName = hotkeys.getKeyName(charCode);
-
-		$input.val(modifiers + keyName);
-
-		var hotkeyValue = (e.ctrlKey ? "1" : "0") + "|" + (e.altKey ? "1" : "0") + "|" + (e.shiftKey ? "1" : "0") + "|" + charCode + "|" + keyName;
-		settings.setItem(s.key, hotkeyValue);
-
-		return false;
+		settings.setItem(s.key, Base64.encode($input.val()));
+		CallOnChangeCallback(s);
 	}
-	var AddKeydownEventToElement = function (eventHandler, defaultSetting, $input)
+	var ThreeStateChanged = function (s, value, $input)
 	{
-		/// <summary>Adds a keydown event handler to the input element.</summary>
-		$input.on('keydown', function (e) { return eventHandler(e, defaultSetting, $input); });
+		settings.setItem(s.key, value.toString());
+		CallOnChangeCallback(s);
+	}
+	var HandleHotkeyChange = function (e, s, $input, textValue, hotkeyValue)
+	{
+		settings.setItem(s.key, hotkeyValue);
+		return false;
 	}
 	var CallOnChangeCallback = function (s)
 	{
@@ -27723,7 +29792,7 @@ function GenerateLocalSnapshotsComment()
 }
 function GenerateEventTriggeredSoundsComment()
 {
-	return GenerateH264RequirementString() + "<br/>Sounds are loaded from Blue Iris's \"www/sounds\" directory. Supported extensions: " + sessionManager.supportedHTML5AudioFormats.join(", ");
+	return "Sounds are loaded from Blue Iris's \"www/sounds\" directory. Supported extensions: " + sessionManager.supportedHTML5AudioFormats.join(", ");
 }
 function GenerateEventTriggeredIconsComment()
 {
@@ -27768,27 +29837,39 @@ function OnChange_ui3_bypass_single_camera_groups()
 {
 	cameraListLoader.LoadCameraList();
 }
-var ui3_contextMenus_trigger_toast = null;
-function OnChange_ui3_contextMenus_trigger(newValue)
+function OnChange_ui3_maxDynamicGroupImageDimension()
 {
-	if (ui3_contextMenus_trigger_toast)
-		ui3_contextMenus_trigger_toast.remove();
-	ui3_contextMenus_trigger_toast = toaster.Info("This setting will take effect when you reload the page.<br><br>Context menus will open on " + settings.ui3_contextMenus_trigger + ".<br><br>Clicking this message will reload the page.", 60000, false
+	videoPlayer.ReopenStreamAtCurrentSeekPosition();
+}
+var ui3_reload_to_take_effect_toast = null;
+function ReloadToTakeEffectToast(extraMessage)
+{
+	DestroyReloadToTakeEffectToast();
+	if (extraMessage)
+		extraMessage = "<br><br>" + extraMessage;
+	else
+		extraMessage = "";
+	ui3_reload_to_take_effect_toast = toaster.Info("This setting will take effect when you reload the page." + extraMessage + "<br><br>Clicking this message will reload the page.", 60000, false
 		, function ()
 		{
 			ReloadInterface();
 		});
 }
-var ui3_ptzPresetShowCount_toast = null;
+function DestroyReloadToTakeEffectToast()
+{
+	if (ui3_reload_to_take_effect_toast)
+	{
+		ui3_reload_to_take_effect_toast.remove();
+		ui3_reload_to_take_effect_toast = null;
+	}
+}
+function OnChange_ui3_contextMenus_trigger(newValue)
+{
+	ReloadToTakeEffectToast("Context menus will open on " + settings.ui3_contextMenus_trigger + ".");
+}
 function OnChange_ui3_ptzPresetShowCount(newValue)
 {
-	if (ui3_ptzPresetShowCount_toast)
-		ui3_ptzPresetShowCount_toast.remove();
-	ui3_ptzPresetShowCount_toast = toaster.Info("This setting will take effect when you reload the page.<br><br>" + settings.ui3_ptzPresetShowCount + " PTZ presets will be shown.<br><br>Clicking this message will reload the page.", 60000, false
-		, function ()
-		{
-			ReloadInterface();
-		});
+	ReloadToTakeEffectToast(settings.ui3_ptzPresetShowCount + " PTZ presets will be shown.");
 }
 function GetPreferredContextMenuTrigger()
 {
@@ -27811,9 +29892,9 @@ function OnChange_ui3_time24hour()
 function OnChange_ui3_topbar_allclips_shortcut_show()
 {
 	if (settings.ui3_topbar_allclips_shortcut_show === "1")
-		$("#open_all_clips_btn").show();
+		$("#open_all_clips_btn").removeClass('hidden');
 	else
-		$("#open_all_clips_btn").hide();
+		$("#open_all_clips_btn").addClass('hidden');
 }
 function OnChange_ui3_topbar_alerts_shortcut_show()
 {
@@ -27832,13 +29913,7 @@ function OnChange_ui3_topbar_warnings_counter()
 }
 function OnChange_ui3_h264_choice()
 {
-	if (ui3_contextMenus_trigger_toast)
-		ui3_contextMenus_trigger_toast.remove();
-	ui3_contextMenus_trigger_toast = toaster.Info("This setting will take effect when you reload the page.<br><br>Clicking this message will reload the page.", 60000, false
-		, function ()
-		{
-			ReloadInterface();
-		});
+	ReloadToTakeEffectToast();
 	uiSettingsPanel.Refresh();
 }
 function Precondition_ui3_h264_choice()
@@ -27849,16 +29924,9 @@ function Precondition_ui3_edge_fetch_bug_h264_enable()
 {
 	return fetch_streams_cant_close_bug;
 }
-var ui3_edge_fetch_bug_h264_enable_toast = null;
 function OnChange_ui3_edge_fetch_bug_h264_enable()
 {
-	if (ui3_edge_fetch_bug_h264_enable_toast)
-		ui3_edge_fetch_bug_h264_enable_toast.remove();
-	ui3_edge_fetch_bug_h264_enable_toast = toaster.Info("This setting will take effect when you reload the page.<br><br>Clicking this message will reload the page.", 60000, false
-		, function ()
-		{
-			ReloadInterface();
-		});
+	ReloadToTakeEffectToast();
 }
 function OnChange_ui3_streamingProfileBitRateMax()
 {
@@ -27884,12 +29952,6 @@ function OnChange_ui3_icons_extraVisibility()
 {
 	cornerStatusIcons.ReInitialize();
 	cameraNameLabels.show();
-}
-function OnChange_ui3_wheelZoomMethod()
-{
-	zoomHandler_Adjustable.ZoomToFit();
-	zoomHandler_Legacy.ZoomToFit();
-	imageRenderer.ImgResized();
 }
 function OnChange_ui3_fullscreen_videoonly()
 {
@@ -27970,6 +30032,22 @@ function OnChange_ui3_prioritizeTriggered()
 {
 	videoPlayer.PrioritizeTriggeredWasToggled();
 }
+function OnChange_ui3_playback_skipDeadAir()
+{
+	videoPlayer.RefreshVideoStream();
+}
+function OnChange_ui3_browserZoomEnabled()
+{
+	SetBrowserZoom(settings.ui3_browserZoomEnabled === "1");
+	imageRenderer.onToggleBrowserZoom();
+}
+function SetBrowserZoom(enable)
+{
+	if (enable)
+		$('meta[name="viewport"]').attr('content', 'width=device-width, initial-scale=1');
+	else
+		$('meta[name="viewport"]').attr('content', 'width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no');
+}
 ///////////////////////////////////////////////////////////////
 // Form Field Helpers /////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
@@ -27987,8 +30065,42 @@ function UIFormField(args)
 		, maxValue: undefined // number / range types
 		, disabled: false
 		, compact: false
+		, defaultValue: undefined // default value.  If defined, this will cause a "reset to default" button to exist.
+		, class: undefined
 	}, args);
 
+	var ff = UIFormFieldInternal(o);
+	if (o.class)
+		ff.addClass(o.class);
+	if (typeof o.defaultValue !== "undefined")
+	{
+		var $defaultButton = $('<div class="uiFormFieldDefaultBtn" title="Reset value to default"><svg class="icon"><use xlink:href="#svg_x5F_Restart"></use></svg></div>');
+		$defaultButton.on('click', function ()
+		{
+			var $input = ff.find('input,select');
+			if (o.inputType === "checkbox")
+				$input.prop('checked', o.defaultValue === "1");
+			else if (o.inputType === "hotkey")
+			{
+				var textValue = getHotkeyTextValueFromHotkeyValue(o.defaultValue);
+				$input.val(textValue);
+				o.onChange(null, o.tag, $input, textValue, o.defaultValue);
+			}
+			else
+			{
+				if (typeof o.defaultValue === "function")
+					$input.val(o.defaultValue());
+				else
+					$input.val(o.defaultValue);
+			}
+			$input.trigger('change');
+		});
+		ff = $defaultButton.add(ff);
+	}
+	return ff;
+}
+function UIFormFieldInternal(o)
+{
 	var disabledClass = (o.disabled ? ' disabled' : '');
 	var compactClass = (o.compact ? ' compact' : '');
 
@@ -28061,19 +30173,14 @@ function UIFormField(args)
 			{
 				$numericValue.text($input.val());
 			});
-			if (typeof o.defaultValue === 'number')
-				$input.on('dblclick', function ()
-				{
-					$input.val(o.defaultValue);
-					$input.trigger('change');
-				});
 			return $('<div class="' + classes + ' dialogOption_item_range"></div>').append($label).append($input);
 		}
 		else
 			return $('<div class="' + classes + '"></div>').append($input).append($label);
 	}
-	else if (o.inputType === "text" || o.inputType === "color")
+	else if (o.inputType === "text" || o.inputType === "color" || o.inputType === "password")
 	{
+		var $inputWrapper = $('<div class="textBasedInput"></div>');
 		var $input = $('<input type="' + o.inputType + '" data-lpignore="true" autocomplete="off" />');
 		if (o.maxValue)
 			$input.attr('maxlength', o.maxValue);
@@ -28082,7 +30189,30 @@ function UIFormField(args)
 			$input.attr("disabled", "disabled");
 		else
 			$input.on('change', function (e) { return o.onChange(e, o.tag, $input); });
-		return $('<div class="dialogOption_item dialogOption_item_info' + disabledClass + compactClass + '"></div>').append($input).append(GetDialogOptionLabel(o.label));
+		$inputWrapper.append($input);
+		if (o.inputType === "password")
+		{
+			$input.addClass('passwordInput');
+			var $showPasswordBtn = $('<a role="button" class="showPasswordButton" title="Show Password">&#x1F441;&#xFE0F;</a>');
+			$showPasswordBtn.on('click', function ()
+			{
+				if ($input.attr('type') === "password")
+				{
+					$input.attr('type', 'text');
+					$showPasswordBtn.attr('title', 'Hide Password');
+					$showPasswordBtn.addClass('showingPassword');
+				}
+				else
+				{
+					$input.attr('type', 'password');
+					$showPasswordBtn.attr('title', 'Show Password');
+					$showPasswordBtn.removeClass('showingPassword');
+				}
+			});
+			$inputWrapper.append($showPasswordBtn);
+		}
+		var $label = $(GetDialogOptionLabel(o.label));
+		return $('<div class="dialogOption_item dialogOption_item_info' + disabledClass + compactClass + '"></div>').append($inputWrapper).append($label);
 	}
 	else if (o.inputType === "button" || o.inputType === "threeState")
 	{
@@ -28116,11 +30246,32 @@ function UIFormField(args)
 			$input.on('click', function (e) { if ($input.attr("disabled") !== "disabled") { return o.onChange(o.tag, $input); } });
 		}
 
-		var $label = $('<label class="dialogOption_label"> ' + o.label + '</label>');
-
 		var $row = $('<div class="dialogOption_item dialogOption_item_btn' + disabledClass + '"></div>');
-		$row.append($label);
+		if (o.label)
+		{
+			var $label = $('<label class="dialogOption_label">' + o.label + ' </label>');
+			$row.append($label);
+		}
 		$row.append($input);
+		return $row;
+	}
+	else if (o.inputType === "hotkey")
+	{
+		var $input = $('<input type="text" />');
+		$input.val(getHotkeyTextValueFromHotkeyValue(o.value));
+		$input.on('keydown', function (e)
+		{
+			var charCode = e.which;
+			var keyName = hotkeys.getKeyName(charCode);
+			var hotkeyValue = (e.ctrlKey ? "1" : "0") + "|" + (e.altKey ? "1" : "0") + "|" + (e.shiftKey ? "1" : "0") + "|" + charCode + "|" + keyName;
+			var textValue = getHotkeyTextValueFromHotkeyValue(hotkeyValue);
+			$input.val(textValue);
+			return o.onChange(e, o.tag, $input, textValue, hotkeyValue);
+		});
+
+		var $row = $('<div class="dialogOption_item dialogOption_item_info"></div>')
+		$row.append($input);
+		$row.append(GetDialogOptionLabel(o.label));
 		return $row;
 	}
 	else if (o.inputType === "errorCommentText")
@@ -28598,38 +30749,58 @@ function CollapsibleSection(id, htmlTitle, dialogToNotify, permanentOpen, onTogg
 // Binary Constants ///////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 var b0000_0001 = 1;
-var b0000_0010 = 2;
-var b0000_0100 = 4;
-var b0000_1000 = 8;
-var b0001_0000 = 16;
-var b0010_0000 = 32;
-var b0100_0000 = 64;
-var b1000_0000 = 128;
-var b0001_0000_0000 = 256;
-var b0000_0000_0100_0000_0000_0000 = 16384;
-var b0000_0000_1000_0000_0000_0000 = 32768;
-var b0000_0001_0000_0000_0000_0000 = 65536;
-var b0000_0010_0000_0000_0000_0000 = 131072;
-var b0000_0100_0000_0000_0000_0000 = 262144;
-var b0000_1000_0000_0000_0000_0000 = 524288;
-var b0001_0000_0000_0000_0000_0000 = 1048576;
-var b0010_0000_0000_0000_0000_0000 = 2097152;
-var b0100_0000_0000_0000_0000_0000 = 4194304;
-var b1000_0000_0000_0000_0000_0000 = 8388608;
-var clip_flag_audio = b0000_0001;
-var clip_flag_flag = b0000_0010;
-var clip_flag_protect = b0000_0100;
-var clip_flag_backingup = b0100_0000;
-var clip_flag_backedup = b1000_0000;
-var clip_flag_is_recording = b0001_0000_0000;
-var alert_flag_sentry_trigger = b0000_0000_0100_0000_0000_0000;
-var alert_flag_sentry_occupied = b0000_0000_1000_0000_0000_0000;
-var alert_flag_offsetMs = b0000_0001_0000_0000_0000_0000;
-var alert_flag_trigger_motion = b0000_0010_0000_0000_0000_0000;
-var alert_flag_nosignal = b0000_0100_0000_0000_0000_0000;
-var alert_flag_trigger_audio = b0000_1000_0000_0000_0000_0000;
-var alert_flag_trigger_external = b0001_0000_0000_0000_0000_0000;
-var alert_flag_trigger_group = b0100_0000_0000_0000_0000_0000;
+var b0000_0010 = 1 << 1; // 2
+var b0000_0100 = 1 << 2; // 4
+var b0000_1000 = 1 << 3; // 8
+var b0001_0000 = 1 << 4; // 16
+var b0010_0000 = 1 << 5; // 32
+var b0100_0000 = 1 << 6; // 64
+var b1000_0000 = 1 << 7; // 128
+
+var BIDBFLAG_AUDIO = 1;
+var BIDBFLAG_FLAGGED = 1 << 1;
+var BIDBFLAG_PROTECTED = 1 << 2;
+var BIDBFLAG_CORRUPT = 1 << 3;
+var BIDBFLAG_DELETE = 1 << 4;
+var BIDBFLAG_DELETED = 1 << 5;
+var BIDBFLAG_ARCHIVE = 1 << 6;
+var BIDBFLAG_ARCHIVED = 1 << 7;
+var BIDBFLAG_RECORDING = 1 << 8;
+var BIDBFLAG_EXPORT = 1 << 9;
+var BIDBFLAG_EXPORTED = 1 << 10;
+var BIDBFLAG_SPECIALOBJ = 1 << 11;
+
+var BIDBFLAG_AI_CONFIRMED_X = 1 << 14;
+var BIDBFLAG_AI_OCCUPIED_X = 1 << 15;
+
+var BIDBFLAG_ALERT_OFFSETTIME = 1 << 16;
+var BIDBFLAG_ALERT_MOTION = 1 << 17;
+var BIDBFLAG_ALERT_ONVIF = 1 << 18;
+var BIDBFLAG_ALERT_AUDIO = 1 << 19;
+var BIDBFLAG_ALERT_EXTERNAL = 1 << 20;
+var BIDBFLAG_ALERT_DIO = 1 << 21;
+var BIDBFLAG_ALERT_GROUP = 1 << 22;
+var BIDBFLAG_ALERT_CANCELLED = 1 << 23;
+var BIDBFLAG_ALERT_NOSIGNAL = 1 << 24;
+var BIDBFLAG_ALERT_HIDDEN = 1 << 24;
+
+var BIDBFLAG_AI_PERSON = 1 << 26;
+var BIDBFLAG_AI_VEHICLE = 1 << 27;
+var BIDBFLAG_AI_CONFIRMED = 1 << 28;
+var BIDBFLAG_AI_OCCUPIED = 1 << 29;
+
+
+var BIDBFLAG_ALERT_TRIGGERBITS = (BIDBFLAG_ALERT_MOTION
+	| BIDBFLAG_ALERT_NOSIGNAL
+	| BIDBFLAG_ALERT_AUDIO
+	| BIDBFLAG_ALERT_EXTERNAL
+	| BIDBFLAG_ALERT_ONVIF
+	| BIDBFLAG_ALERT_DIO
+	| BIDBFLAG_ALERT_GROUP
+	| BIDBFLAG_ALERT_CANCELLED);
+
+var NO_SHOW_ON_TIMELINE = BIDBFLAG_DELETED | BIDBFLAG_ALERT_HIDDEN;
+
 var TRIGGER_SOURCE_MOTION = (1 << 1);
 var TRIGGER_SOURCE_ONVIF = (1 << 2);
 var TRIGGER_SOURCE_AUDIO = (1 << 3);
@@ -28710,14 +30881,15 @@ function StringBuilder(lineBreakStr)
 ///////////////////////////////////////////////////////////////
 // Uint8Array to Data URI /////////////////////////////////////
 ///////////////////////////////////////////////////////////////
+/**
+ * The dataUri returned from this method should be sent to window.URL.revokeObjectURL() when it is done being used!
+ * @param {Uint8Array} someUint8Array Uint8Array to convert into a data URI (actually, it will become a "blob:" url)
+ */
 function Uint8ArrayToDataURI(someUint8Array)
 {
-	// <summary>The dataUri returned from this method should be sent to window.URL.revokeObjectURL() when it is done being used!</summary>
 	var blob = new Blob([someUint8Array]);
 	return window.URL.createObjectURL(blob);
 }
-
-
 ///////////////////////////////////////////////////////////////
 // Programmatic Sound Player //////////////////////////////////
 ///////////////////////////////////////////////////////////////
@@ -28982,6 +31154,390 @@ function TestSpeech()
 	programmaticSoundPlayer.Speak(speeches[getRandomInt(speeches.length)], true);
 }
 ///////////////////////////////////////////////////////////////
+// MQTT Client ////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////
+// UI3 uses paho-mqtt instead of the better-maintained mqtt.js, because the latter is about 6x larger filesize.
+function OnChange_ui3_mqttClientEnabled()
+{
+	if (settings.ui3_mqttClientEnabled === "1")
+	{
+		mqttClient.disconnect();
+		mqttClient = new MqttClient();
+	}
+	else
+		mqttClient.disconnect();
+}
+function GetRandomMqttInstanceId()
+{
+	return getRandomAlphanumericStr(12);
+}
+var mqttWindowId = getRandomAlphanumericStr(16); // Used by MQTT client to indicate that this unique browser window is connected to the broker.
+/**
+ Clientside cache of state values from the MQTT broker so we can track when things actually change versus when we just get notified of the same value again.
+ */
+var mqttTopicState = new MqttTopicState();
+function MqttClient()
+{
+	var self = this;
+	/**
+	 * If a video ID is received from MQTT before loading has completed, it will be stored in this property.
+	 */
+	this.preLoadVideoSpecified = null;
+
+	var hasDisconnected = false;
+
+	var client;
+	var isConnected = false;
+
+	var clientId = "ui3" + getRandomBase36String(17); // Used by MQTT broker to indentify reconnecting clients after a lost connection. Must be unique across all active connections. Not persisted outside of memory so it doesn't get shared with other browser windows.
+
+	var brokerUrl = settings.ui3_mqttBrokerUrl;
+	var user = settings.ui3_mqttUser;
+	var pass = Base64.decode(settings.ui3_mqttPass);
+	var instance_id = settings.ui3_mqttInstanceId; // This UI3 instance only cares about topics with this instance ID in them.
+	var subscribeEnabled = settings.ui3_mqttSubscribeEnabled === "1";
+	var subscribeQos = Clamp(parseInt(settings.ui3_mqttSubscribeQOS), 0, 2);
+	var publishEnabled = settings.ui3_mqttPublishEnabled === "1";
+	var publishQos = Clamp(parseInt(settings.ui3_mqttPublishQOS), 0, 2);
+	var publishRetain = settings.ui3_mqttPublishRetain === "1";
+	var clientEnabled = settings.ui3_mqttClientEnabled === "1";
+
+	var publishQueue = new FasterObjectMap();
+	var eventRemovalFunctions = [];
+
+	function connect()
+	{
+		try
+		{
+			if (!clientEnabled)
+				return;
+			if (!subscribeEnabled && !publishEnabled)
+			{
+				toaster.Warning("MQTT Client was enabled, but publishing and subscribing were disabled. MQTT client has nothing to do.", 10000);
+				return;
+			}
+			if (!instance_id)
+				instance_id = settings.ui3_mqttInstanceId = GetRandomMqttInstanceId();
+			if (instance_id.length > 12)
+				instance_id = settings.ui3_mqttInstanceId = instance_id.substr(0, 12);
+
+			hasDisconnected = false;
+
+			client = new Paho.Client(brokerUrl, clientId);
+
+			client.onConnectionLost = onConnectionLost;
+			client.onMessageArrived = onMessageArrived;
+
+			var willMessage = new Paho.Message("");
+			willMessage.destinationName = "ui3/" + instance_id + "/online/" + mqttWindowId;
+			willMessage.retained = true;
+			willMessage.qos = 1;
+			var connectArgs = {
+				userName: user
+				, password: pass
+				, mqttVersion: 4
+				, reconnect: true
+				, cleanSession: (subscribeQos === 0 && publishQos === 0)
+				, onSuccess: onConnect
+				, onFailure: onConnectFailure
+				, invocationContext: self
+				, willMessage: willMessage
+			};
+			client.connect(connectArgs);
+		}
+		catch (ex)
+		{
+			toaster.Error("MqttClient connect exception: " + ex, 10000);
+		}
+	}
+
+	this.disconnect = function ()
+	{
+		try
+		{
+			if (!hasDisconnected)
+				internalDisconnect();
+		}
+		catch (ex)
+		{
+			console.log("MqttClient disconnect exception: ", ex);
+		}
+	}
+	function internalDisconnect()
+	{
+		hasDisconnected = true;
+		if (client && isConnected)
+		{
+			internalPublish("ui3/" + instance_id + "/online/" + mqttWindowId, "", 1, true, true);
+			client.disconnect();
+		}
+		for (var i = 0; i < eventRemovalFunctions.length; i++)
+			eventRemovalFunctions[i]();
+		eventRemovalFunctions = [];
+	}
+
+	function onConnect(arg)
+	{
+		if (arg.invocationContext !== self)
+			return;
+		try
+		{
+			isConnected = true;
+			toaster.Success("Connected to MQTT broker.", 3000);
+			if (hasDisconnected)
+			{
+				console.log("MqttClient just finished connecting, but disconnect() has already been called. Disconnecting now.");
+				internalDisconnect();
+				return;
+			}
+
+			if (subscribeEnabled)
+				startSubscription();
+			if (publishEnabled)
+				startPublishing();
+
+			var syncMode = "pub/sub";
+			if (!subscribeEnabled)
+				syncMode = "pub only";
+			else if (!publishEnabled)
+				syncMode = "sub only";
+			internalPublish("ui3/" + instance_id + "/online/" + mqttWindowId, syncMode, 1, true);
+		}
+		catch (ex)
+		{
+			toaster.Error("MqttClient onConnect exception: " + ex, 10000);
+		}
+	}
+
+	function onConnectFailure(arg)
+	{
+		if (arg.invocationContext !== self)
+			return;
+		try
+		{
+			isConnected = false;
+			toaster.Warning("MQTT Connect Failed: " + arg.errorCode + " " + arg.errorMessage, 10000);
+		}
+		catch (ex)
+		{
+			toaster.Error("MqttClient onConnectFailure exception: " + ex);
+		}
+	}
+
+	function onConnectionLost(arg)
+	{
+		try
+		{
+			isConnected = false;
+			if (arg.errorCode === 0)
+				toaster.Info("MQTT Disconnected", 3000);
+			else
+				toaster.Warning("MQTT Disconnected: " + arg.errorCode + " " + arg.errorMessage, 10000);
+		}
+		catch (ex)
+		{
+			toaster.Error("MqttClient onConnectionLost exception: " + ex, 10000);
+		}
+	}
+
+	function startSubscription()
+	{
+		var subscribeOptions = {
+			qos: subscribeQos
+			, invocationContext: self
+			, onSuccess: function (arg)
+			{
+				if (arg.invocationContext !== self)
+					return;
+				try
+				{
+					toaster.Success("UI3 is ready to be remotely controlled.", 3000);
+				}
+				catch (ex)
+				{
+					toaster.Error("MqttClient subscription success handler exception: " + ex, 10000);
+				}
+			}
+			, onFailure: function (arg)
+			{
+				if (context !== self)
+					return;
+				try
+				{
+					toaster.Error("MqttClient Subscription Failed: " + arg.errorCode + " " + arg.errorMessage, 10000);
+				}
+				catch (ex)
+				{
+					toaster.Error("MqttClient subscription fail handler exception: " + ex, 10000);
+				}
+			}
+		};
+		client.subscribe("ui3/" + instance_id + "/state/#", subscribeOptions);
+	}
+
+	function onMessageArrived(message)
+	{
+		try
+		{
+			console.log('MQTT Received: "' + message.topic + '" -> "' + message.payloadString + '"');
+			if (!subscribeEnabled)
+			{
+				console.log("Rejecting MQTT message because subscription was not enabled in settings.");
+				return;
+			}
+			// EXAMPLE TOPIC: "ui3/instance_id/state/vid"
+			var parts = message.topic.split('/');
+			if (parts.length === 4)
+			{
+				if (parts[0] === "ui3" && parts[1] === instance_id && parts[2] === "state")
+				{
+					var key = parts[3];
+					var value = message.payloadString;
+					mqttTopicState.set(key, value);
+					if (key === "vid")
+					{
+						if (!cameraListLoader.GetLastResponse())
+							self.preLoadVideoSpecified = value;
+						else
+						{
+							var camData = cameraListLoader.GetCameraWithId(value);
+							if (camData && videoPlayer.Loading().image.id !== camData.optionValue)
+								videoPlayer.LoadLiveCamera(camData);
+						}
+					}
+					else if (key === "maximize")
+					{
+						if (value === "1")
+							maximizedModeController.EnableMaximizedMode();
+						else
+							maximizedModeController.DisableMaximizedMode();
+					}
+					else if (key === "volume")
+					{
+						var newVolume = Clamp(parseFloat(value), 0, 100) / 100.0;
+						settings.ui3_audioMute = newVolume === 0 ? "1" : "0";
+						settings.ui3_audioVolume = newVolume;
+						statusBars.setProgress("volume", newVolume, "");
+					}
+				}
+			}
+		}
+		catch (ex)
+		{
+			toaster.Error("MqttClient onMessageArrived exception: " + ex, 10000);
+		}
+	}
+
+	function startPublishing()
+	{
+		if (publishEnabled)
+		{
+			processPublishQueue();
+			eventRemovalFunctions.push(BI_CustomEvent.AddListener("OpenVideo", function (loading)
+			{
+				if (loading.isLive)
+				{
+					self.publish("vid", loading.id);
+				}
+			}));
+			eventRemovalFunctions.push(BI_CustomEvent.AddListener("MaximizeChanged", function (maximized)
+			{
+				self.publish("maximize", maximized ? "1" : "0");
+			}));
+		}
+	}
+
+	function processPublishQueue()
+	{
+		if (client && isConnected && publishQueue)
+		{
+			for (var k in publishQueue)
+			{
+				var v = publishQueue[k];
+				self.publish(k, v);
+			}
+			publishQueue = null;
+		}
+	}
+
+	var debounced_PublishVolume = debounce(function ()
+	{
+		var volume = Math.floor(parseFloat(settings.ui3_audioVolume) * 100.0);
+		if (settings.ui3_audioMute === "1")
+			volume = 0;
+		self.publish("volume", volume);
+	}, 400);
+
+	this.volumeChanged = function ()
+	{
+		debounced_PublishVolume();
+	}
+
+	this.publish = function (key, value)
+	{
+		if (!publishEnabled)
+			return;
+		value = value.toString();
+		if (!client || !isConnected)
+		{
+			if (publishQueue)
+				publishQueue[key] = value;
+		}
+		else
+		{
+			if (mqttTopicState.set(key, value))
+			{
+				internalPublish("ui3/" + instance_id + "/state/" + key, value, publishQos, publishRetain);
+			}
+		}
+	}
+	var internalPublish = function (topic, message, qos, retain, suppressExceptions)
+	{
+		try
+		{
+			var message = new Paho.Message(message);
+			message.destinationName = topic;
+			if (typeof qos !== "undefined")
+				message.qos = qos;
+			if (typeof retain !== "undefined")
+				message.retained = retain;
+			client.publish(message);
+			console.log('MQTT Publish: "' + topic + '" -> "' + message + '"');
+		}
+		catch (ex)
+		{
+			if (!suppressExceptions)
+				toaster.Error("MqttClient publish exception: " + ex, 10000);
+		}
+	}
+
+	connect();
+}
+function MqttTopicState()
+{
+	var map = new FasterObjectMap();
+	/**
+	 * Sets the value, returning true if the value has changed as a result of calling this method.
+	 * @param {String} key
+	 * @param {any} value
+	 */
+	this.set = function (key, value)
+	{
+		var oldValue = map[key];
+		if (oldValue !== value)
+		{
+			map[key] = value;
+			return true;
+		}
+		else
+			return false;
+	}
+	this.get = function (key)
+	{
+		return map[key];
+	}
+}
+///////////////////////////////////////////////////////////////
 // Misc ///////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////
 function IsStandaloneApp()
@@ -29048,9 +31604,9 @@ function logoutOldSession(oldSession)
 	//if (oldSession != null && oldSession != sessionManager.GetAPISession())
 	//	ExecJSON({ cmd: "logout", session: oldSession });
 }
-function GetDialogOptionLabel(text)
+function GetDialogOptionLabel(html)
 {
-	return '<div class="dialogOption_label">' + text + '</div>';
+	return '<div class="dialogOption_label">' + html + '</div>';
 }
 function GetHtmlOptionElementMarkup(value, name, selectedValue)
 {
@@ -29150,7 +31706,7 @@ function makeUnselectable($target)
 		.addClass('unselectable') // All these attributes are inheritable
 		.attr('unselectable', 'on') // For IE9 - This property is not inherited, needs to be placed onto everything
 		.attr('draggable', 'false') // For moz and webkit, although Firefox 16 ignores this when -moz-user-select: none; is set, it's like these properties are mutually exclusive, seems to be a bug.
-		.on('dragstart', function () { return false; });  // Needed since Firefox 16 seems to ingore the 'draggable' attribute we just applied above when '-moz-user-select: none' is applied to the CSS 
+		.on('dragstart', function () { return false; });  // Needed since Firefox 16 seems to ingore the 'draggable' attribute we just applied above when '-moz-user-select: none' is applied to the CSS
 
 	$target // Apply non-inheritable properties to the child elements
 		.find('*:not(.selectable)')
@@ -29177,6 +31733,26 @@ function pointInsideElement($ele, pX, pY)
 	}
 	return pX >= o.left && pX < o.left + w && pY >= o.top && pY < o.top + h;
 }
+function pointToElementRelative($ele, pX, pY)
+{
+	if ($ele.length == 0)
+		return false;
+	var ele = $ele.get(0);
+	var o, w, h;
+	if (ele.savedBounds)
+	{
+		o = { left: ele.savedBounds.x, top: ele.savedBounds.y };
+		w = ele.savedBounds.w;
+		h = ele.savedBounds.h;
+	}
+	else
+	{
+		o = $ele.offset();
+		w = $ele.outerWidth(true);
+		h = $ele.outerHeight(true);
+	}
+	return { x: pX - o.left, y: pY - o.top };
+}
 function pointInsideElementBorder($ele, pX, pY)
 {
 	if ($ele.length == 0)
@@ -29190,6 +31766,11 @@ function BlueIrisColorToCssColor(biColor)
 {
 	var colorHex = biColor.toString(16).padLeft(8, '0').substr(2);
 	return colorHex.substr(4, 2) + colorHex.substr(2, 2) + colorHex.substr(0, 2);
+}
+function BlueIrisColorToHsl(biColor)
+{
+	var o = HexColorToRgbObj(BlueIrisColorToCssColor(biColor));
+	return rgbToHsl(o.r, o.g, o.b);
 }
 function HexColorToRgbObj(c)
 {
@@ -29222,7 +31803,32 @@ function GetReadableTextColorHexForBackgroundColorHex(c, dark, light)
 			return "DDDDDD";
 	}
 }
-function hslToRgb(h, s, l) { if (0 == s) l = s = h = l; else { var f = function (l, s, c) { 0 > c && (c += 1); 1 < c && --c; return c < 1 / 6 ? l + 6 * (s - l) * c : .5 > c ? s : c < 2 / 3 ? l + (s - l) * (2 / 3 - c) * 6 : l }, e = .5 > l ? l * (1 + s) : l + s - l * s, g = 2 * l - e; l = f(g, e, h + 1 / 3); s = f(g, e, h); h = f(g, e, h - 1 / 3) } return [255 * l, 255 * s, 255 * h] }
+function hslToRgb(h, s, l) { if (0 == s) l = s = h = l; else { var f = function (l, s, c) { 0 > c && (c += 1); 1 < c && --c; return c < 1 / 6 ? l + 6 * (s - l) * c : .5 > c ? s : c < 2 / 3 ? l + (s - l) * (2 / 3 - c) * 6 : l }, e = .5 > l ? l * (1 + s) : l + s - l * s, g = 2 * l - e; l = f(g, e, h + 1 / 3); s = f(g, e, h); h = f(g, e, h - 1 / 3) } return { r: Math.round(255 * l), g: Math.round(255 * s), b: Math.round(255 * h) } }
+function rgbToHsl(r, g, b) { r /= 255; g /= 255; b /= 255; var e = Math.max(r, g, b), a = Math.min(r, g, b), h = (e + a) / 2; if (e == a) var f = a = 0; else { var z = e - a; a = .5 < h ? z / (2 - e - a) : z / (e + a); switch (e) { case r: f = (g - b) / z + (g < b ? 6 : 0); break; case g: f = (b - r) / z + 2; break; case b: f = (r - g) / z + 4 }f /= 6 } return { h: f, s: a, l: h } };
+function CompareBlueIrisColors(a, b)
+{
+	return CompareHSLColors(BlueIrisColorToHsl(a), BlueIrisColorToHsl(b));
+}
+function CompareHSLColors(a, b)
+{
+	var diff = a.h - b.h;
+	if (diff === 0)
+		diff = a.s - b.s;
+	if (diff === 0)
+		diff = a.l - b.l;
+	return diff;
+}
+/**
+ * Returns the first argument if it is a valid 3-digit or 6-digit hex color preceded by a '#', otherwise returns the second argument.
+ * @param {String} color Color that is possibly invalid.
+ * @param {String} fallbackColor Color that is guaranteed to be valid. Will be returned if the first argument is not a valid hex color.
+ */
+function ValidateHexColor(color, fallbackColor)
+{
+	if (color && (color.match(/^#[0-9a-f]{6}$/i) || color.match(/^#[0-9a-f]{3}$/i)))
+		return color;
+	return fallbackColor;
+}
 function PercentTo01Float(s, defaultValue)
 {
 	s = parseFloat(s) / 100;
@@ -29345,6 +31951,34 @@ function GetTimeFromBIStr(str)
 		seconds = 10;
 
 	return { hours: hours, minutes: minutes, seconds: seconds };
+}
+function MsToDHMS(ms, includeMilliseconds, includeSpaces)
+{
+	var negative = "";
+	if (ms < 0)
+	{
+		negative = "-";
+		ms *= -1;
+	}
+	var space = includeSpaces ? " " : "";
+	var days = Math.floor(ms / 86400000);
+	ms = ms % 86400000;
+	var hours = Math.floor(ms / 3600000);
+	ms = ms % 3600000;
+	var minutes = Math.floor(ms / 60000);
+	ms = ms % 60000;
+	var seconds = Math.floor(ms / 1000);
+	ms = ms % 1000;
+
+	var str = "";
+	if (days > 0)
+		str += days + "d" + space;
+	if (str.length > 0 || hours > 0)
+		str += hours + "h" + space;
+	if (str.length > 0 || minutes > 0)
+		str += minutes + "m" + space;
+	str += seconds + (includeMilliseconds && ms > 0 ? "." + ms.toString().padLeft(3, "0") : "") + "s";
+	return negative + str;
 }
 function GetClipFileSize(fileSize)
 {
@@ -29472,17 +32106,17 @@ function GetDateStr(date, includeMilliseconds)
 }
 function GetDateDisplayStr(date, includeWeekday)
 {
-	var sameDay = isSameDay(date, GetServerDate(new Date()));
+	var sameDay = isSameDay(date, GetServerDate(new Date(GetUtcNow())));
 	return (sameDay ? "Today, " : "") + date.getMonthName() + " " + date.getDate() + (sameDay ? "" : ", " + date.getFullYear()) + (includeWeekday ? ' <span class="dayNameShort">(' + date.getDayNameShort() + ')</span><span class="dayNameFull">(' + date.getDayName() + ')</span>' : '');
 }
 function GetDateDisplayStrShort(date, includeDayNameShort)
 {
-	var sameDay = isSameDay(date, GetServerDate(new Date()));
+	var sameDay = isSameDay(date, GetServerDate(new Date(GetUtcNow())));
 	return (sameDay ? "Today, " : "") + date.getMonthNameShort() + " " + date.getDate() + (sameDay ? "" : (", " + date.getFullYear())) + (includeDayNameShort ? ' (' + (date.getDayNameShort() + ')') : '');
 }
 function GetShortDateOrToday(date)
 {
-	var sameDay = isSameDay(date, GetServerDate(new Date()));
+	var sameDay = isSameDay(date, GetServerDate(new Date(GetUtcNow())));
 	if (sameDay)
 		return "Today";
 	else
@@ -29925,7 +32559,7 @@ function BrowserIsIOSChrome()
 }
 function BrowserIsAndroid()
 {
-	return !!navigator.userAgent.match(/ Android /);
+	return !!navigator.userAgent.match(/ Android /) || !!navigator.userAgent.match(/\(Android \d+;/);
 }
 function getHiddenProp()
 {
@@ -29957,37 +32591,46 @@ function documentIsHidden()
 
 	return document[prop];
 }
+/**
+ * Given a date in local time, returns a new date with the time adjusted so that it reads as if the browser shared a time zone with the server. Does not correct clock sync.
+ * @param {Date} date Date in local time zone.
+ */
 function GetServerDate(date)
 {
-	/// <summary>
-	/// Given a date in local time, returns a new date with the time adjusted so that it reads as if the browser shared a time zone with the server.
-	/// </summary>
 	return new Date(date.getTime() + GetServerTimeOffset());
 }
+/**
+ * For use when GetServerDate() caused the date to be offset in the wrong direction for the desired effect. Does not correct clock sync.
+ * Due to complex time zone handling, sometimes you need to subtract the time zone offset instead of add it.  This method does that.
+ * @param {Date} date Date in server time zone (but local time zone is desired).
+ */
 function GetReverseServerDate(date)
 {
-	/// <summary>
-	/// For use when GetServerDate() caused the date to be offset in the wrong direction for the desired effect.
-	/// Due to complex time zone handling, sometimes you need to subtract the time zone offset instead of add it.  This method does that.
-	/// </summary>
 	return new Date(date.getTime() - GetServerTimeOffset());
 }
+/**
+ * Returns the difference in milliseconds between this browser's time zone and the server's time zone.
+ * 
+ * Timekeeping inaccuracy between the server and client is NOT accounted for by this method.  This is only for display purposes, to make the date appear as it would if the client was in the server's time zone.
+ * 
+ * The following code would print the date and time as if this machine was running in the server's time zone.
+ *
+ *	var utcMs = new Date().getTime();
+ *	var serverTime = new Date(utcMs + GetServerTimeOffset());
+ *	console.log(serverTime.toString());
+ */
 function GetServerTimeOffset()
 {
-	/// <summary>
-	/// Returns the difference in milliseconds between this browser's time zone and the server's time zone such that this code would print the date and time that it currently is on the server:
-	///
-	/// var utcMs = new Date().getTime();
-	/// var serverTime = new Date(utcMs + GetServerTimeOffset());
-	/// console.log(serverTime.toString());
-	/// </summary>
 	var localOffsetMs = new Date().getTimezoneOffset() * 60000;
 	var serverOffsetMs = serverTimeZoneOffsetMs;
 	return localOffsetMs - serverOffsetMs;
 }
+/**
+ * Returns the binary representation of a number.
+ * @param {Number} dec A number to print in binary as a string.
+ */
 function dec2bin(dec)
 {
-	/// <summary>Returns the binary representation of a number.</summary>
 	return (dec >>> 0).toString(2);
 }
 function InsertSpacesInBinary(binaryString, maxLength)
@@ -30036,7 +32679,7 @@ function RemoveUrlParams()
 	for (var i = 0; i < arguments.length; i++)
 	{
 		var param = arguments[i];
-		var rx = new RegExp('(&|\\?)' + param + '=[^&?#%]+', 'gi');
+		var rx = new RegExp('[&?]' + param + '=[^&?#]*', 'gi');
 		s = s.replace(rx, "");
 		while (s.indexOf("&") === 0)
 		{
@@ -30166,6 +32809,22 @@ function getRandomInt(maxPlusOne)
 {
 	return Clamp(Math.floor(Math.random() * maxPlusOne), 0, maxPlusOne - 1);
 }
+function getRandomAlphanumericStr(length)
+{
+	var chars = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+	if (!length)
+		length = 8;
+	var result = '';
+	for (var i = length; i > 0; --i)
+		result += chars[Math.floor(Math.random() * chars.length)];
+	return result;
+}
+function getRandomBase36String(length)
+{
+	if (!length)
+		length = 8;
+	return Math.round((Math.pow(36, length + 1) - Math.random() * Math.pow(36, length))).toString(36).slice(1);
+}
 function PreviewSpeedToDelayMs(speed)
 {
 	if (!speed)
@@ -30177,3 +32836,262 @@ function PreviewSpeedToDelayMs(speed)
 	//var sqrt = Math.sqrt(scaled);
 	//return 1000 - Clamp(sqrt * 984, 0, 1000);
 }
+
+/**
+ * FasterObjectMap can be used in lieu of regular empty objects as a slightly faster key/value map which does not require the use of hasOwnProperty when iterating over keys.
+ * In fact it doesn't have a hasOwnProperty function. 
+ */
+function FasterObjectMap() { }
+FasterObjectMap.prototype = Object.create(null);
+
+function WrapperMap(vueReactive)
+{
+	var map;
+	if (vueReactive)
+	{
+		if (typeof Map === "function")
+		{
+			this.r = 1;
+			map = new Map();
+			this.get = function (key)
+			{
+				if (this.r)
+					return map.get(key);
+			};
+			this.set = function (key, value)
+			{
+				this.r = this.r === 2 ? 1 : 2;
+				map.set(key, value);
+			};
+		}
+		else
+		{
+			map = new FasterObjectMap();
+			this.get = function (key)
+			{
+				if (this.r)
+					return map[key];
+			};
+			this.set = function (key, value)
+			{
+				this.r = this.r === 2 ? 1 : 2;
+				map[key] = value;
+			};
+		}
+	}
+	else
+	{
+		if (typeof Map === "function")
+		{
+			map = new Map();
+			this.get = function (key)
+			{
+				return map.get(key);
+			};
+			this.set = function (key, value)
+			{
+				map.set(key, value);
+			};
+		}
+		else
+		{
+			map = new FasterObjectMap();
+			this.get = function (key)
+			{
+				return map[key];
+			};
+			this.set = function (key, value)
+			{
+				map[key] = value;
+			};
+		}
+	}
+	this.internalMap = map;
+}
+
+function normalizeWheelEvent(e)
+{
+	var sX = 0, sY = 0, pX = 0, pY = 0;
+
+	if ('detail' in e) sY = e.detail;
+	if ('wheelDelta' in e) sY = -e.wheelDelta / 120;
+	if ('wheelDeltaY' in e) sY = -e.wheelDeltaY / 120;
+	if ('wheelDeltaX' in e) sX = -e.wheelDeltaX / 120;
+
+	pX = sX * 10;
+	pY = sY * 10;
+
+	if ('deltaY' in e) pY = e.deltaY;
+	if ('deltaX' in e) pX = e.deltaX;
+
+	if ((pX || pY) && e.deltaMode)
+	{
+		if (e.deltaMode === 1)
+		{
+			pX *= 40;
+			pY *= 40;
+		}
+		else if (e.deltaMode === 2)
+		{
+			pX *= 800;
+			pY *= 800;
+		}
+	}
+	if (pX && !sX) sX = (pX < 1) ? -1 : 1;
+	if (pY && !sY) sY = (pY < 1) ? -1 : 1;
+
+	// Galaxy Tabpro S touchpad pinch zoom in Win10/Chrome causes a spew of spinY @ 1.5 magnitude despite relatively small pixelY values.
+	// The zoom direction is also reversed, but I'm afraid that swapping it here might break it on more devices.
+	if (Math.abs(sX) > 1 && pX < 30) sX = pX * 0.02;
+	if (Math.abs(sY) > 1 && pY < 30) sY = pY * 0.02;
+
+	return {
+		spinX: sX, // Normalized to 1 for a wheel detent
+		spinY: sY, // Normalized to 1 for a wheel detent
+		pixelX: pX, // Arbitrary browser/os dependent number of pixels.
+		pixelY: pY // Arbitrary browser/os dependent number of pixels.
+	};
+}
+function ui3Modulus(n, m)
+{
+	return ((n % m) + m) % m;
+}
+/**
+ * Constructor for ui3Rect. Contains a width and height and provides scaling functions.
+ * @param {Number} w Rectangle width
+ * @param {aNumberny} h Rectangle height
+ */
+function ui3Rect(w, h)
+{
+	if (typeof w !== "number" || typeof h !== "number")
+		throw Error("ui3Rect was constructed with an invalid or missing argument.");
+	var self = this;
+	this.w = w;
+	this.h = h;
+	/**
+	 * Downscales this rectangle if necessary, but does not upscale, to fit within the given rectangle.  Preserve's this rectangle's aspect ratio.  Returns self.
+	 * @param {ui3Rect} otherRect Another ui3Rect to fit this rect within.
+	 */
+	this.ApplyBoundingBox = function (otherRect)
+	{
+		var myAspect = self.AspectRatio();
+		if (self.w > otherRect.w)
+		{
+			self.w = otherRect.w;
+			self.h = self.w / myAspect;
+		}
+		if (self.h > otherRect.h)
+		{
+			self.h = otherRect.h;
+			self.w = self.h * myAspect;
+		}
+		return self;
+	}
+	/**
+	 * Scales this rectangle to be able to fit the given rectangle fully within it, preserving my aspect ratio.  Returns self.
+	 * @param {ui3Rect} otherRect Another ui3Rect to fit this rect around.
+	 */
+	this.ExpandAround = function (otherRect)
+	{
+		var myAspect = self.AspectRatio();
+		if (self.w < otherRect.w)
+		{
+			self.w = otherRect.w;
+			self.h = self.w / myAspect;
+		}
+		if (self.h < otherRect.h)
+		{
+			self.h = otherRect.h;
+			self.w = self.h * myAspect;
+		}
+		return self;
+	}
+	/** Returns this rectangle's aspect ratio (w/h). */
+	this.AspectRatio = function ()
+	{
+		return self.w / self.h;
+	}
+	/** Returns true if this rectangle's width and height match a given rectangle's width and height.
+	 * @param { ui3Rect } otherRect Another ui3Rect that defines the minimum size.
+	 */
+	this.Equals = function (otherRect)
+	{
+		if (!otherRect)
+			return false;
+		return self.w === otherRect.w && self.h === otherRect.h;
+	}
+	/** Multplies the dimensions of this rectangle by a given scaler. Returns self. */
+	this.MultiplyBy = function (scaler)
+	{
+		self.w *= scaler;
+		self.h *= scaler;
+		return self;
+	}
+	/** Swaps w and h fields. Returns self. */
+	this.Rotate = function ()
+	{
+		var tmp = self.w;
+		self.w = self.h;
+		self.h = tmp;
+		return self;
+	}
+	/** Rounds the dimensions of this rectangle to the nearest integer. Returns self. */
+	this.Round = function ()
+	{
+		self.w = Math.round(self.w);
+		self.h = Math.round(self.h);
+		return self;
+	}
+	/** Makes the dimensions of this rectangle divisible by 8. Returns self. */
+	this.MakeDivisibleBy8 = function ()
+	{
+		self.w = MakeDivisibleBy8(self.w);
+		self.h = MakeDivisibleBy8(self.h);
+		return self;
+	}
+	/** Returns a copy of this rectangle. */
+	this.Copy = function ()
+	{
+		return new ui3Rect(self.w, self.h);
+	}
+	this.toString = function ()
+	{
+		return self.w + "x" + self.h;
+	}
+}
+function MakeDivisibleBy8(num)
+{
+	var rem = num % 8;
+	if (!rem)
+		return num;
+	if (num < 3840)
+		return num + (8 - num % 8);
+	else
+		return num - num % 8;
+}
+function getHotkeyTextValueFromHotkeyValue(val)
+{
+	if (!val)
+		val = "";
+	var parts = val.split("|");
+	if (parts.length < 4)
+		return "unset";
+	else
+		return (parts[0] === "1" ? "CTRL + " : "")
+			+ (parts[1] === "1" ? "ALT + " : "")
+			+ (parts[2] === "1" ? "SHIFT + " : "")
+			+ hotkeys.getKeyName(parts[3]);
+}
+// Disable middle-click scrolling. In most non-scrollable parts of UI3 in Chrome, middle click causes the cursor to get stuck in the scrolling state.
+setTimeout(function ()
+{
+	BindEvents(document, 'mousedown', function (e)
+	{
+		if (e.which === 2)
+		{
+			e.preventDefault();
+			e.stopPropagation();
+			return false;
+		}
+	});
+}, 0);

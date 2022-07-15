@@ -3,25 +3,40 @@ version: '2.4'
 services:
   blueiris:
     build:
-      context: docker
+      context: docker/blueiris
       dockerfile: ./Dockerfile
+      args:
+        - UID=1000
+        - GID=1000
+        - ARCH=64
+        - WINE_BRANCH=stable
     restart: unless-stopped
     hostname: blueiris
     container_name: blueiris
     ports:
-      - 1007:8080   # vnc
-      # - 5900:5900
-      - 1006:1006   # blueiris www
+      - 1007:8080    # noVNC
+      - 1006:1006    # blueiris www
+      # - 5900:5900    # vnc
     environment:
-      TZ: America/Chicago
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: all
+      - TZ=America/Chicago
+      # https://github.com/jshridha/docker-blueiris/issues/54
+      - WINE_DEBUG_OPT=-all
     runtime: nvidia
-    volumes:
-      - ./data/wineuser_prefix:/home/wineuser/prefix
-      - ./data/prefix32:/root/prefix32
-      # This is my NAS and I configure blueiris to store stuff there
-      # - nvr-data:/root/prefix32/drive_c/BlueIris/nvr_storage
-    # Only need this the first time you run it
+    healthcheck:
+      test: ["CMD", "curl", "-s", "--fail", "-i", "http://localhost:1006/"]
+      timeout: 30s
+      interval: 10s
+      retries: 3
+    # Needed for NFS / Samba volume access and possibly on first install
     privileged: true
-    init: true
+
+volumes:
+  nvr-data:
+    # driver_opts:
+    #   type: "cifs"
+    #   device: "//192.168.1.10/nvr"
+    #   o: "addr=192.168.1.10,rw,uid=1000,username=username,password=changeme,nobrl"
+    driver_opts:
+      type: nfs
+      o: addr=192.168.1.10,rw,relatime,vers=4,hard,proto=tcp,timeo=600,retrans=2,sec=sys,local_lock=none
+      device: ":/nvr"
